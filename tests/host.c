@@ -12,6 +12,7 @@
 #include <errno.h>
 typedef struct {uint32_t fd,rest[3];} Service;
 static void path(const char *p,char *out) {
+    if(p[0]=='/'){snprintf(out,1024,"%s",p);return;}
     const char *root=getenv("SWAGENT_TEST_ROOT");if(!root)root="build/host-sd";
     const char *colon=strchr(p,':');snprintf(out,1024,"%s%s",root,colon?colon+1:p);
 }
@@ -32,7 +33,17 @@ uint32_t fsFileFlush(Service *s){return fsync(s->fd)?errno:0;}
 uint32_t fsFileGetSize(Service *s,int64_t *n){struct stat st;if(fstat(s->fd,&st))return errno;*n=st.st_size;return 0;}
 void fsFsClose(Service *s){(void)s;}
 /* Test fixture CNMT NCA is plain bytes. Real NCA decryption belongs to FSP. */
-uint32_t sa_cnmt_open(const char *p,Service *file,Service *fs){(void)fs;return sa_open(p,0,file);}
+uint32_t sa_stage_open(const char *name,int64_t size,Service *file,Service *fs){
+    (void)name;(void)size;memset(fs,0,sizeof(*fs));
+    return sa_open("sdmc:/switch/.host-stage.nca",1,file);
+}
+uint32_t sa_stage_commit(Service *fs){(void)fs;return 0;}
+void sa_stage_close(Service *fs){(void)fs;sa_remove("sdmc:/switch/.host-stage.nca");}
+uint32_t sa_cnmt_open(const char *p,Service *file,Service *fs){
+    (void)fs;
+    if(strncmp(p,"@SystemContent://swagent-install/",33))return 999;
+    return sa_open("sdmc:/switch/.host-stage.nca",0,file);
+}
 static uint32_t fail_write,max_write,registered,deleted,tickets,ns_commands;
 void host_reset(uint32_t fail){fail_write=fail;max_write=registered=deleted=tickets=ns_commands=0;}
 uint32_t host_stat(uint32_t n){switch(n){case 0:return max_write;case 1:return registered;case 2:return deleted;case 3:return tickets;default:return ns_commands;}}
@@ -57,3 +68,5 @@ uint32_t sa_rename(const char *a,const char *b){char from[1024],to[1024];path(a,
 static uint32_t launch_result;
 void host_launch_result(uint32_t rc){launch_result=rc;}
 uint32_t sa_launch(uint64_t *pid){*pid=123;return launch_result;}
+uint32_t svcGetProcessId(uint64_t *pid,uint32_t handle){(void)handle;*pid=456;return 0;}
+uint32_t sa_terminate(uint64_t pid){(void)pid;return ENOSYS;}

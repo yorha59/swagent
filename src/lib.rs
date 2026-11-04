@@ -26,7 +26,7 @@ pub extern "C" fn agent_main() -> ! {
         log::add("service initialization failed; retrying");
         util::sleep(5000);
     }
-    log::add("swagent-1.1-rs");
+    log::add("swagent-1.3-rs");
     loop {
         let code = unsafe { ffi::sa_spawn(0, protocol::worker, core::ptr::null_mut()) };
         if code == 0 {

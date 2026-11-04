@@ -255,7 +255,7 @@ pub(crate) fn apply_update(url: &str) -> Result<u64> {
 fn update(id: u64, url: &str) -> Result {
     apply_update(url)?;
     RETIRING.store(true, Release);
-    // Release server first, then client. Never terminate the old process.
+    // Release server first, then client, before asking PM to terminate us.
     let listener = LISTENER.swap(-1, AcqRel);
     if listener >= 0 {
         unsafe {
@@ -265,8 +265,24 @@ fn update(id: u64, url: &str) -> Result {
     }
     let _ = reply(id, b"update: ok");
     disconnect();
-    log::add("update: retired; sleeping forever");
-    forever()
+    sleep(500);
+    loop {
+        let mut pid = 0;
+        // libnx CUR_PROCESS_HANDLE: query our PID, never the replacement's PID.
+        let mut rc = unsafe { ffi::svcGetProcessId(&mut pid, 0xffff8001) };
+        if rc == 0 {
+            let mut line = Text::<192>::new();
+            let _ = write!(line, "update: retiring, terminating self pid={pid}");
+            log::add(line.str());
+            rc = unsafe { ffi::sa_terminate(pid) };
+        }
+        // A successful self-termination does not return. Retry PM failures
+        // rather than leaving another permanently resident retired instance.
+        let mut line = Text::<192>::new();
+        let _ = write!(line, "update: self termination returned rc={rc}; retrying");
+        log::add(line.str());
+        sleep(1000);
+    }
 }
 fn disconnect() {
     SESSION.with(|s| {
@@ -286,7 +302,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, b"pong");
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.1-rs");
+            let _ = reply(id, b"swagent-1.3-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {

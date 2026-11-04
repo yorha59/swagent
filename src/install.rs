@@ -4,6 +4,8 @@ use crate::{
     io::{self, File},
     util::*,
 };
+// PFS0 entries are u64 offset, u64 size, u32 name offset, u32 reserved.
+const PFS_ENTRY_SIZE: usize = 24;
 const NSP: &str = "sdmc:/switch/.install.tmp.nsp";
 const CNCA: &str = "sdmc:/switch/.install.tmp.cnmt.nca";
 const CHUNK: usize = 4 * 1024 * 1024;
@@ -27,7 +29,7 @@ impl Pfs {
         if &h[..4] != b"PFS0" || count == 0 || count > 2048 {
             return Err(Error("invalid PFS0 header", 0));
         }
-        let n = 16 + 24 * count + strings;
+        let n = 16 + PFS_ENTRY_SIZE * count + strings;
         let size = f.size()?;
         if n > 256 * 1024 || n as u64 >= size {
             return Err(Error("PFS0 header size", 0));
@@ -73,11 +75,11 @@ impl Pfs {
     }
 }
 pub fn entry(header: &[u8], count: usize, base: u64, i: usize) -> Result<Entry<'_>> {
-    if i >= count || 16 + 24 * count > header.len() {
+    if i >= count || 16 + PFS_ENTRY_SIZE * count > header.len() {
         return Err(Error("PFS0 table bounds", 0));
     }
-    let p = &header[16 + i * 24..16 + (i + 1) * 24];
-    let strings = &header[16 + count * 24..];
+    let p = &header[16 + i * PFS_ENTRY_SIZE..16 + (i + 1) * PFS_ENTRY_SIZE];
+    let strings = &header[16 + count * PFS_ENTRY_SIZE..];
     let name = le32(&p[16..]) as usize;
     let rest = strings.get(name..).ok_or(Error("PFS0 name offset", 0))?;
     let end = rest
@@ -105,6 +107,12 @@ impl Drop for Cleanup {
     fn drop(&mut self) {
         io::remove(NSP);
         io::remove(CNCA)
+    }
+}
+struct Stage(Service);
+impl Drop for Stage {
+    fn drop(&mut self) {
+        unsafe { ffi::sa_stage_close(&mut self.0) }
     }
 }
 struct Mounted(Service);
@@ -154,6 +162,29 @@ fn ticket(f: &mut File, p: &Pfs) -> Result {
         if !t.name.ends_with(".tik") {
             continue;
         }
+        if t.size < 4 || t.size > 0x1000 {
+            return Err(Error("ticket size", 0));
+        }
+        let mut tik = Buffer::new(t.size as usize)?;
+        f.read(t.off, &mut tik)?;
+        let sig = le32(&tik[..4]);
+        let body = 4 + match sig {
+            0x10000 | 0x10003 => 0x23c,
+            0x10001 | 0x10004 => 0x13c,
+            0x10002 | 0x10005 => 0x7c,
+            0x10006 => 0x3c,
+            _ => {
+                let mut warning = Text::<192>::new();
+                warning.push(b"install: skipping invalid ticket (sig=0x")?;
+                warning.push(hex(&sig.to_be_bytes()).bytes())?;
+                warning.push(b")")?;
+                crate::log::add(warning.str());
+                continue;
+            }
+        };
+        if body + 0x180 > tik.len() {
+            return Err(Error("truncated ticket", 0));
+        }
         let name = t.name.strip_suffix(".tik").unwrap_or("");
         let mut cert = Text::<160>::new();
         cert.push(name.as_bytes())?;
@@ -161,36 +192,27 @@ fn ticket(f: &mut File, p: &Pfs) -> Result {
         let c = p
             .find(cert.str())
             .map_err(|_| Error("ticket requires matching certificate", 0))?;
-        if t.size < 4 || t.size > 0x1000 || c.size == 0 || c.size > 0x4000 {
-            return Err(Error("ticket/certificate size", 0));
+        if c.size == 0 || c.size > 0x4000 {
+            return Err(Error("certificate size", 0));
         }
-        let mut tik = Buffer::new(t.size as usize)?;
         let mut certificate = Buffer::new(c.size as usize)?;
-        f.read(t.off, &mut tik)?;
         f.read(c.off, &mut certificate)?;
-        let sig = u32::from_be_bytes(tik[..4].try_into().unwrap());
-        let body = 4 + match sig {
-            0x10000 | 0x10003 => 0x23c,
-            0x10001 | 0x10004 => 0x13c,
-            0x10002 | 0x10005 => 0x7c,
-            0x10006 => 0x3c,
-            _ => return Err(Error("ticket signature type", 0)),
-        };
-        if body + 0x180 > tik.len() {
-            return Err(Error("truncated ticket", 0));
-        }
         tik[body + 0x146] &= !0x10;
-        rc(
-            unsafe {
-                ffi::sa_ticket(
-                    tik.as_ptr(),
-                    tik.len(),
-                    certificate.as_ptr(),
-                    certificate.len(),
-                )
-            },
-            "es ImportTicket",
-        )?;
+        let result = unsafe {
+            ffi::sa_ticket(
+                tik.as_ptr(),
+                tik.len(),
+                certificate.as_ptr(),
+                certificate.len(),
+            )
+        };
+        if result != 0 {
+            let mut warning = Text::<192>::new();
+            warning.push(b"install: ticket import failed (rc=0x")?;
+            warning.push(hex(&result.to_be_bytes()).bytes())?;
+            warning.push(b"); continuing")?;
+            crate::log::add(warning.str());
+        }
     }
     Ok(())
 }
@@ -361,8 +383,20 @@ pub fn install(url: &str, storage: u32) -> Result<u64> {
     let mut chunk = Buffer::new(CHUNK)?;
     crate::log::add("install: downloading");
     http::download(url, NSP, &mut chunk, 32 * 1024 * 1024 * 1024)?;
+    install_downloaded(storage, &mut chunk)
+}
+pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> {
+    let _cleanup = Cleanup;
     let mut f = File::open(NSP, false)?;
     let p = Pfs::open(&mut f)?;
+    for i in 0..p.count {
+        use core::fmt::Write;
+        let e = p.entry(i)?;
+        let mut line = Text::<192>::new();
+        write!(&mut line, "install: file {} size={}", e.name, e.size)
+            .map_err(|_| Error("file log length", 0))?;
+        crate::log::add(line.str());
+    }
     ticket(&mut f, &p)?;
     let mut cnca = None;
     for i in 0..p.count {
@@ -390,16 +424,43 @@ pub fn install(url: &str, storage: u32) -> Result<u64> {
         }
         out.flush()?;
     }
+    // Match Goldleaf: copy the SD-extracted CNMT NCA to SYSTEM Contents,
+    // then ask FSP to decrypt it through the SystemContent device.
+    let mut name = Text::<160>::new();
+    name.push(cnca.name.as_bytes())?;
+    let mut stage_fs = Service::default();
+    let mut stage_file = Service::default();
+    rc(
+        unsafe { ffi::sa_stage_open(name.c(), cnca.size as i64, &mut stage_file, &mut stage_fs) },
+        "stage CNMT on SYSTEM",
+    )?;
+    let mut stage = Stage(stage_fs);
+    {
+        let mut out = File(stage_file);
+        let mut input = File::open(CNCA, false)?;
+        let mut off = 0;
+        while off < cnca.size {
+            if crate::retiring() {
+                return Err(Error("retired", 0));
+            }
+            let n = (cnca.size - off).min(chunk.len() as u64) as usize;
+            input.read(off, &mut chunk[..n])?;
+            out.write(off, &chunk[..n])?;
+            off += n as u64;
+        }
+        out.flush()?;
+    }
+    rc(
+        unsafe { ffi::sa_stage_commit(&mut stage.0) },
+        "commit CNMT staging",
+    )?;
+    let mut content_path = Text::<256>::new();
+    content_path.push(b"@SystemContent://swagent-install/")?;
+    content_path.push(cnca.name.as_bytes())?;
     let mut mounted = Service::default();
     let mut cnmt_file = Service::default();
     rc(
-        unsafe {
-            ffi::sa_cnmt_open(
-                c"@Sdcard:/switch/.install.tmp.cnmt.nca".as_ptr(),
-                &mut cnmt_file,
-                &mut mounted,
-            )
-        },
+        unsafe { ffi::sa_cnmt_open(content_path.c(), &mut cnmt_file, &mut mounted) },
         "open CNMT filesystem",
     )?;
     let mount = Mounted(mounted);
@@ -412,6 +473,7 @@ pub fn install(url: &str, storage: u32) -> Result<u64> {
     cnmt_file.read(0, &mut data)?;
     drop(cnmt_file);
     drop(mount);
+    drop(stage);
     let m = meta(&data)?;
     let mut own = [0u8; 24];
     own[..16].copy_from_slice(&id);

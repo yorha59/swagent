@@ -137,7 +137,7 @@ fn cnmt() -> Vec<u8> {
 }
 fn package() -> Vec<u8> {
     let mut tik = vec![0; 0x350];
-    tik[..4].copy_from_slice(&0x10004u32.to_be_bytes());
+    tik[..4].copy_from_slice(&0x10004u32.to_le_bytes());
     tik[0x286] = 0x10;
     let files = vec![
         ("11111111111111111111111111111111.cnmt.nca", cnmt()),
@@ -189,10 +189,52 @@ fn installer_streams_single_chunk_and_cleans_failure() {
             assert_eq!(result.unwrap_err(), Error("write placeholder", fail));
             assert_eq!(unsafe { host_stat(2) }, 1);
         }
+        assert!(!std::path::Path::new("build/host-sd/switch/.host-stage.nca").exists());
         assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
         assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.cnmt.nca").exists());
     }
 }
+#[test]
+fn installer_continues_without_importing_invalid_or_failed_tickets() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    for (sig, warning) in [
+        (
+            0xb28fab5au32,
+            "install: skipping invalid ticket (sig=0xb28fab5a)",
+        ),
+        (
+            0x10006,
+            "install: ticket import failed (rc=0x000003e7); continuing",
+        ),
+    ] {
+        unsafe { host_reset(0) };
+        let mut image = package();
+        let count = util::le32(&image[4..]) as usize;
+        let base = 16 + 24 * count + util::le32(&image[8..]) as usize;
+        let ticket = install::entry(&image[..base], count, base as u64, 2).unwrap();
+        let off = ticket.off as usize;
+        image[off..off + 4].copy_from_slice(&sig.to_le_bytes());
+        if sig == 0xb28fab5a {
+            // A placeholder must not require a matching certificate.
+            let pos = image
+                .windows(12)
+                .position(|s| s == b"license.cert")
+                .unwrap();
+            image[pos] = b'x';
+        }
+        let (url, server) = server(image, false, false);
+        let result = install::install(&url, 5);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0x0100123400000000);
+        assert_eq!(unsafe { host_stat(1) }, 2);
+        assert_eq!(unsafe { host_stat(3) }, 0);
+        let mut found = false;
+        log::dump(1000, |line| found |= line == warning.as_bytes());
+        assert!(found, "missing warning: {warning}");
+    }
+}
+
 #[test]
 fn malformed_cnmt_never_panics() {
     let c = cnmt();
@@ -336,7 +378,7 @@ fn ping_version_and_busy_while_install_worker_is_blocked() {
         .unwrap();
     let mut client = BufReader::new(client);
     let mut line = String::new();
-    for (command, expected) in [("ping", "pong\r\n"), ("version", "swagent-1.1-rs\r\n")] {
+    for (command, expected) in [("ping", "pong\r\n"), ("version", "swagent-1.3-rs\r\n")] {
         protocol::test_receive(command);
         client.read_line(&mut line).unwrap();
         assert_eq!(line, expected);
@@ -388,4 +430,82 @@ fn removed_commands_are_unknown() {
         assert_eq!(line, "error: unknown command\r\n", "{command}");
     }
     protocol::test_session(-1);
+}
+
+// Optional local fixture: read only the header and file prefixes, never load 5 GB.
+#[test]
+fn known_good_gta_update_pfs0_from_disk() {
+    use std::io::{Seek, SeekFrom};
+    let path = "/tmp/nsp_share/GTA_VC_Update.nsp";
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("fixture unavailable: {path}");
+            return;
+        }
+        Err(e) => panic!("{path}: {e}"),
+    };
+    let size = file.metadata().unwrap().len();
+    let mut source = io::File::open(path, false).unwrap();
+    let parsed = install::Pfs::open(&mut source).unwrap();
+    assert_eq!(parsed.count, 8);
+    parsed.validate(size).unwrap();
+    let mut fixed = [0; 16];
+    file.read_exact(&mut fixed).unwrap();
+    assert_eq!(&fixed[..4], b"PFS0");
+    let count = util::le32(&fixed[4..]) as usize;
+    assert_eq!(count, 8);
+    let base = 16 + count * 24 + util::le32(&fixed[8..]) as usize;
+    let mut header = vec![0; base];
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.read_exact(&mut header).unwrap();
+    let mut ticket_found = false;
+    let mut meta_found = false;
+    for i in 0..count {
+        let e = install::entry(&header, count, base as u64, i).unwrap();
+        let actual = parsed.entry(i).unwrap();
+        assert_eq!(
+            (actual.name, actual.off, actual.size),
+            (e.name, e.off, e.size)
+        );
+        assert!(e.off >= base as u64 && e.off + e.size <= size);
+        println!("{} size={} absolute_offset={}", e.name, e.size, e.off);
+        if e.name.ends_with(".tik") {
+            ticket_found = true;
+            let mut sig = [0; 4];
+            file.seek(SeekFrom::Start(e.off)).unwrap();
+            file.read_exact(&mut sig).unwrap();
+            assert_eq!(e.size, 704);
+            assert_eq!(util::le32(&sig), 0x10004);
+            println!("ticket prefix: {sig:02x?}");
+        }
+        meta_found |= e.name.ends_with(".cnmt.nca");
+    }
+    assert!(ticket_found && meta_found);
+}
+
+#[test]
+fn installer_from_disk_stages_and_cleans_success_and_failure() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    for fail in [0, 0x1234] {
+        unsafe { host_reset(fail) };
+        std::fs::write("build/host-sd/switch/.install.tmp.nsp", package()).unwrap();
+        let mut chunk = vec![0; 4 * 1024 * 1024];
+        let result = install::install_downloaded(5, &mut chunk);
+        if fail == 0 {
+            assert_eq!(result.unwrap(), 0x0100123400000000);
+            assert_eq!(unsafe { host_stat(1) }, 2);
+            assert_eq!(unsafe { host_stat(3) }, 1);
+        } else {
+            assert_eq!(result.unwrap_err(), Error("write placeholder", fail));
+        }
+        for name in [
+            ".install.tmp.nsp",
+            ".install.tmp.cnmt.nca",
+            ".host-stage.nca",
+        ] {
+            assert!(!std::path::Path::new(&format!("build/host-sd/switch/{name}")).exists());
+        }
+    }
 }

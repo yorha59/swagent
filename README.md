@@ -1,4 +1,4 @@
-# swagent — swagent-1.1-rs
+# swagent — swagent-1.3-rs
 
 Minimal resident Nintendo Switch agent. Title ID `430000000000000B`, TCP port
 `6000`, no UI, no polling tasks beyond accepting commands. Path B: Rust `no_std`
@@ -53,7 +53,7 @@ then recovers. Commands are case-sensitive.
 | Command | Response |
 | --- | --- |
 | `ping` | `pong` |
-| `version` | `swagent-1.1-rs` |
+| `version` | `swagent-1.3-rs` |
 | `install http://host[:port]/file.nsp [sd\|nand]` | `install: ok TITLEID`, or `install: error WHAT rc=N` |
 | `update http://host[:port]/exefs.nsp` | `update: ok` then disconnect, or `update: error WHAT rc=N` |
 | `log [N]` | Up to N ring entries, then `log: end` (default 100, max 1000) |

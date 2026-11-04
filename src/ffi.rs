@@ -56,6 +56,9 @@ extern "C" {
     pub fn fsFileFlush(f: *mut Service) -> u32;
     pub fn fsFileGetSize(f: *mut Service, out: *mut i64) -> u32;
     pub fn fsFsClose(s: *mut Service);
+    pub fn sa_stage_open(name: *const c_char, size: i64, f: *mut Service, fs: *mut Service) -> u32;
+    pub fn sa_stage_commit(fs: *mut Service) -> u32;
+    pub fn sa_stage_close(fs: *mut Service);
     pub fn sa_cnmt_open(p: *const c_char, f: *mut Service, fs: *mut Service) -> u32;
     pub fn sa_ticket(t: *const u8, tn: usize, c: *const u8, cn: usize) -> u32;
     pub fn ncmInitialize() -> u32;
@@ -90,4 +93,6 @@ extern "C" {
     pub fn sa_ns(cmd: u32, p: *const u8, n: u32, buf: *mut u8, size: usize, count: *mut u32)
         -> u32;
     pub fn sa_launch(pid: *mut u64) -> u32;
+    pub fn svcGetProcessId(pid: *mut u64, handle: u32) -> u32;
+    pub fn sa_terminate(pid: u64) -> u32;
 }

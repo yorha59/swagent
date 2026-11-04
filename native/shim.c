@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 u32 __nx_applet_type = AppletType_None;
 void __libnx_initheap(void) {
@@ -92,6 +93,31 @@ u32 sa_rename(const char *from, const char *to) {
         return MAKERESULT(Module_Libnx,LibnxError_BadInput);
     return fsFsRenameFile(fs,a,b);
 }
+/* Goldleaf stages metadata on BIS SYSTEM, addressed through SystemContent.
+ * Keep the original content-id filename; @Sdcard is not a content mount. */
+#define SA_STAGE_DIR "/Contents/swagent-install"
+u32 sa_stage_open(const char *name, s64 size, FsFile *out, FsFileSystem *fs) {
+    Result rc=fsOpenBisFileSystem(fs,FsBisPartitionId_System,"");
+    if (rc) return rc;
+    fsFsDeleteDirectoryRecursively(fs,SA_STAGE_DIR);
+    rc=fsFsCreateDirectory(fs,SA_STAGE_DIR);
+    char path[FS_MAX_PATH];
+    snprintf(path,sizeof(path),SA_STAGE_DIR "/%s",name);
+    if (!rc) rc=fsFsCreateFile(fs,path,size,0);
+    if (!rc) rc=fsFsOpenFile(fs,path,FsOpenMode_Write,out);
+    if (rc) {
+        fsFsDeleteDirectoryRecursively(fs,SA_STAGE_DIR);
+        fsFsCommit(fs);
+        fsFsClose(fs);
+    }
+    return rc;
+}
+u32 sa_stage_commit(FsFileSystem *fs) { return fsFsCommit(fs); }
+void sa_stage_close(FsFileSystem *fs) {
+    fsFsDeleteDirectoryRecursively(fs,SA_STAGE_DIR);
+    fsFsCommit(fs);
+    fsFsClose(fs);
+}
 u32 sa_cnmt_open(const char *nca, FsFile *out, FsFileSystem *outfs) {
     Result rc = fsOpenFileSystemWithId(outfs,0,FsFileSystemType_ContentMeta,nca,FsContentAttributes_All);
     if (rc) return rc;
@@ -133,6 +159,11 @@ u32 sa_launch(u64 *pid) {
     Result rc=pmshellInitialize(); if(rc) return rc;
     NcmProgramLocation loc={.program_id=0x430000000000000B,.storageID=NcmStorageId_None};
     rc=pmshellLaunchProgram(0,&loc,pid); pmshellExit(); return rc;
+}
+/* Process termination belongs to pm:shell, not pm:dmnt, in libnx. */
+u32 sa_terminate(u64 pid) {
+    Result rc=pmshellInitialize(); if(rc) return rc;
+    rc=pmshellTerminateProcess(pid); pmshellExit(); return rc;
 }
 
 /* Guard third-party libc fatal fallbacks against process teardown. */
