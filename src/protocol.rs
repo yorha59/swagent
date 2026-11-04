@@ -139,6 +139,36 @@ fn execute(job: Job) {
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
+            "df" => {
+                if words.next().is_some() {
+                    return Err(Error("usage: df", 0));
+                }
+                let (mut total, mut free) = (0i64, 0i64);
+                rc(
+                    unsafe { ffi::sa_sd_space(&mut total, &mut free) },
+                    "get SD space",
+                )?;
+                let mut s = Text::<192>::new();
+                let _ = write!(s, "df: sd total={} free={}", total, free);
+                for (label, bytes) in [("total", total), ("free", free)] {
+                    // Decimal MB/GB, with two fractional digits and no floating point.
+                    let (unit, divisor) = if bytes >= 1_000_000_000 {
+                        ("GB", 1_000_000_000)
+                    } else {
+                        ("MB", 1_000_000)
+                    };
+                    let _ = write!(
+                        s,
+                        " {}={}.{:02} {}",
+                        label,
+                        bytes / divisor,
+                        (bytes % divisor) * 100 / divisor,
+                        unit
+                    );
+                }
+                reply(id, s.bytes())?;
+                reply(id, b"df: end")?;
+            }
             "ps" => {
                 if words.next().is_some() {
                     return Err(Error("usage: ps", 0));
@@ -166,12 +196,13 @@ fn execute(job: Job) {
                 let _info = Info;
                 for &pid in &pids[..count as usize] {
                     let mut program_id = 0;
-                    rc(
-                        unsafe { ffi::pminfoGetProgramId(&mut program_id, pid) },
-                        "get program id",
-                    )?;
+                    let result = unsafe { ffi::pminfoGetProgramId(&mut program_id, pid) };
                     let mut s = Text::<64>::new();
-                    let _ = write!(s, "ps: {} {:016x}", pid, program_id);
+                    if result == 0 {
+                        let _ = write!(s, "ps: {} {:016x}", pid, program_id);
+                    } else {
+                        let _ = write!(s, "ps: {} ?", pid);
+                    }
                     reply(id, s.bytes())?;
                 }
                 reply(id, b"ps: end")?;
@@ -362,7 +393,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, b"pong");
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.4-rs");
+            let _ = reply(id, b"swagent-1.5-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {

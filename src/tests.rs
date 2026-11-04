@@ -135,7 +135,23 @@ fn process_commands_queue_self_guard_and_errors() {
         ),
         (3, "ps", "ps: error list processes rc=99\r\n", 0, 0),
         (4, "ps", "ps: error initialize pm:info rc=100\r\n", 0, 0),
-        (5, "ps", "ps: error get program id rc=101\r\n", 0, 1),
+        (5, "ps", "ps: 123 ?\r\nps: 456 ?\r\nps: end\r\n", 0, 1),
+        (
+            7,
+            "ps",
+            "ps: 123 ?\r\nps: 456 430000000000000b\r\nps: end\r\n",
+            0,
+            1,
+        ),
+        (
+            0,
+            "df",
+            "df: sd total=64000000000 free=512500000 total=64.00 GB free=512.50 MB\r\ndf: end\r\n",
+            0,
+            0,
+        ),
+        (8, "df", "df: error get SD space rc=102\r\n", 0, 0),
+        (0, "df extra", "df: error usage: df rc=0\r\n", 0, 0),
         (
             6,
             "ps",
@@ -460,7 +476,7 @@ fn ping_version_and_busy_while_install_worker_is_blocked() {
         .unwrap();
     let mut client = BufReader::new(client);
     let mut line = String::new();
-    for (command, expected) in [("ping", "pong\r\n"), ("version", "swagent-1.4-rs\r\n")] {
+    for (command, expected) in [("ping", "pong\r\n"), ("version", "swagent-1.5-rs\r\n")] {
         protocol::test_receive(command);
         client.read_line(&mut line).unwrap();
         assert_eq!(line, expected);
