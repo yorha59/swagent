@@ -1,0 +1,4 @@
+[build]
+target = "aarch64-unknown-none"
+[target.aarch64-unknown-none]
+rustflags = ["-C", "relocation-model=pic", "-C", "target-feature=+neon"]
