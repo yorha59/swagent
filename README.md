@@ -6,6 +6,11 @@ staticlib and a small C ABI shim, linked with devkitA64/libnx's stock CRT.
 All command, queue, HTTP, installation and handover policy is Rust.
 See [RESEARCH.md](RESEARCH.md) for the build-path decision.
 
+> **Disclaimer** — This software is provided for educational and research
+> purposes, for use on consoles you own, with content you are legally entitled
+> to install. It contains no copyrighted keys, firmware, or proprietary code.
+> The authors are not affiliated with Nintendo. Use at your own risk.
+
 ## Build and deploy
 
 This machine has two Rust installations. Homebrew's `rustc` is 1.99.1; the
