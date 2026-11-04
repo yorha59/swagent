@@ -1,9 +1,9 @@
-# swagent — swagent-1.0-rs
+# swagent — swagent-1.1-rs
 
 Minimal resident Nintendo Switch agent. Title ID `430000000000000B`, TCP port
 `6000`, no UI, no polling tasks beyond accepting commands. Path B: Rust `no_std`
 staticlib and a small C ABI shim, linked with devkitA64/libnx's stock CRT.
-All command, queue, HTTP, PNG, installation and handover policy is Rust.
+All command, queue, HTTP, installation and handover policy is Rust.
 See [RESEARCH.md](RESEARCH.md) for the build-path decision.
 
 ## Build and deploy
@@ -19,9 +19,7 @@ make -j2
 make check
 ```
 
-Requires `$HOME/devkitpro` (override `DEVKITPRO`), libnx, devkitA64, Switch tools
-and the installed Switch portlib `libturbojpeg`. TurboJPEG supplies fallible JPEG
-decoding; Rust streams an RGB PNG with stored DEFLATE blocks and base64 encoding.
+Requires `$HOME/devkitpro` (override `DEVKITPRO`), libnx, devkitA64 and Switch tools.
 
 Copy the generated `dist/atmosphere` directory onto the SD root, merging folders:
 
@@ -50,29 +48,20 @@ printf 'ping\r\nversion\r\n' | nc SWITCH_IP 6000
 
 One active TCP client. Lines are ASCII, at most 511 bytes excluding CRLF.
 Malformed/oversized lines are discarded through the next CRLF; the stream
-then recovers. Commands and button names are case-sensitive.
+then recovers. Commands are case-sensitive.
 
 | Command | Response |
 | --- | --- |
 | `ping` | `pong` |
-| `version` | `swagent-1.0-rs` |
-| `shot` | Base64 PNG lines (up to 768 characters), then `shot: end` |
-| `key BUTTON [hold_ms]` | `key: ok`, or `key: error WHAT rc=N` |
-| `touch x y [hold_ms]` | `touch: ok`, or `touch: error WHAT rc=N` |
+| `version` | `swagent-1.1-rs` |
 | `install http://host[:port]/file.nsp [sd\|nand]` | `install: ok TITLEID`, or `install: error WHAT rc=N` |
 | `update http://host[:port]/exefs.nsp` | `update: ok` then disconnect, or `update: error WHAT rc=N` |
 | `log [N]` | Up to N ring entries, then `log: end` (default 100, max 1000) |
 
-Buttons: `A B X Y L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN LSTICK RSTICK`
-(with `+ - LS RS` aliases). Hold defaults to 100 ms, range 0–60000 ms.
-Touch coordinates: x 0–1279, y 0–719. Release is attempted even when press fails.
-Capture errors return `shot: error WHAT rc=N` without `shot: end`.
-
 The receive thread executes `ping`, `version` and `update` directly. Every
 other command uses the eight-entry worker queue; overflow returns exactly
 `error: busy`. Install never occupies the receive thread. Responses are
-serialized per line, so fast replies can appear between screenshot/log lines.
-Discard `pong`/version responses before concatenating screenshot base64 if
+serialized per line, so fast replies can appear between log lines when
 pipelining commands. Jobs from a disconnected session are discarded. A running
 install continues through a client disconnect and records completion in the ring.
 
@@ -93,8 +82,7 @@ accumulates full buffers before writing, with a final partial buffer. PFS0 heade
 are capped at 256 KiB / 2048 files; packaged/rebuilt metadata at 512 KiB each.
 The static ring is about 216 KiB outside the heap. Concurrent update download
 uses only 64 KiB, rather than another 4 MiB buffer. No allocation scales with NSP
-size. PNG encoding streams scanlines; only bounded JPEG and decoded RGB reside
-in memory. Files are accessed through 64-bit libnx FS offsets.
+size. Files are accessed through 64-bit libnx FS offsets.
 
 Installation follows the inspected Goldleaf sequence:
 
@@ -138,17 +126,17 @@ in-memory diagnostic; all expected command/network/service errors return lines.
 ## Validation and limits
 
 `make check` builds the real AArch64 NSP, runs host tests using libnx ABI doubles,
-independently checks PNG CRC/zlib/pixels with Python, and validates the generated
+validates the generated
 PFS0, NSO, NPDM title ID, ELF architecture and absence of linked process-exit
 functions. Host doubles are never linked into the NSP.
 
 Tests cover protocol framing/recovery, queue overflow/FIFO, URL rejection,
-base64 boundaries, PNG output, truncated/chunked HTTP, parser bounds, ring wrap
+removed-command rejection, truncated/chunked HTTP, parser bounds, ring wrap
 and concurrency, multi-chunk installs, ticket import, placeholder cleanup after
 injected failures, update title validation and failed-launch rollback. A blocked
 install test verifies `ping`, `version` and overflow replies on the live session.
 
-No Switch hardware is attached: actual caps/HID behavior, retail NCA installation
+No Switch hardware is attached: retail NCA installation
 and PM relaunch still require on-device validation. The build artifact is a
 proper ExeFS NSP; a successful host build does not establish runtime compatibility
 with every Horizon/Atmosphere version.
@@ -160,11 +148,11 @@ Cargo.toml, Cargo.lock, .cargo/config.toml  Rust staticlib, no dependencies
 Makefile, swagent.json                     devkitA64/NSO/NPDM/PFS0 build
 native/shim.c                             startup and ABI adapters
 src/lib.rs, ffi.rs, util.rs                entry, bindings, bounded utilities
-src/protocol.rs                            receive fast path, queue, HID, update
+src/protocol.rs                            receive fast path, queue, update
 src/http.rs, io.rs                         streaming HTTP and scoped handles
-src/image.rs, log.rs                       PNG/base64 and atomic ring
+src/log.rs                                atomic ring
 src/install.rs                            PFS0, CNMT, tickets, NCM/NS flow
 src/tests.rs, tests/host.c                  host tests and libnx doubles
-tests/check_png.py, check_artifact.py       independent format checks
+tests/check_artifact.py                    independent artifact checks
 RESEARCH.md                               Phase 0 findings
 ```

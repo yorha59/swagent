@@ -1,5 +1,5 @@
 use crate::{
-    ffi, http, image, install,
+    ffi, http, install,
     io::{self, File, Socket},
     log,
     util::*,
@@ -133,98 +133,12 @@ pub extern "C" fn worker(_: *mut core::ffi::c_void) {
         }
     }
 }
-pub fn button(name: &str) -> Result<u64> {
-    let bit = match name {
-        "A" => 0,
-        "B" => 1,
-        "X" => 2,
-        "Y" => 3,
-        "LSTICK" | "LS" => 4,
-        "RSTICK" | "RS" => 5,
-        "L" => 6,
-        "R" => 7,
-        "ZL" => 8,
-        "ZR" => 9,
-        "PLUS" | "+" => 10,
-        "MINUS" | "-" => 11,
-        "LEFT" => 12,
-        "UP" => 13,
-        "RIGHT" => 14,
-        "DOWN" => 15,
-        _ => return Err(Error("unknown button", 0)),
-    };
-    Ok(1u64 << bit)
-}
-fn duration(s: Option<&str>) -> Result<u64> {
-    match s {
-        None => Ok(100),
-        Some(s) => s
-            .parse::<u64>()
-            .ok()
-            .filter(|n| *n <= 60_000)
-            .ok_or(Error("hold_ms must be 0..60000", 0)),
-    }
-}
 fn execute(job: Job) {
     let id = job.id;
     let mut words = job.line.str().split_ascii_whitespace();
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
-            "shot" => {
-                if words.next().is_some() {
-                    return Err(Error("usage: shot", 0));
-                }
-                image::shot(|p| reply(id, p))?;
-                reply(id, b"shot: end")?;
-            }
-            "key" => {
-                let b = button(
-                    words
-                        .next()
-                        .ok_or(Error("usage: key BUTTON [hold_ms]", 0))?,
-                )?;
-                let ms = duration(words.next())?;
-                if words.next().is_some() {
-                    return Err(Error("too many arguments", 0));
-                }
-                rc(unsafe { ffi::sa_hid_init() }, "HID initialize")?;
-                let down = unsafe { ffi::sa_buttons(b) };
-                if down == 0 {
-                    sleep(ms)
-                }
-                let up = unsafe { ffi::sa_buttons(0) };
-                rc(down, "press key")?;
-                rc(up, "release key")?;
-                reply(id, b"key: ok")?;
-            }
-            "touch" => {
-                let x = words
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .filter(|n| *n < 1280)
-                    .ok_or(Error("x must be 0..1279", 0))?;
-                let y = words
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .filter(|n| *n < 720)
-                    .ok_or(Error("y must be 0..719", 0))?;
-                let ms = duration(words.next())?;
-                if words.next().is_some() {
-                    return Err(Error("too many arguments", 0));
-                }
-                rc(unsafe { ffi::sa_hid_init() }, "HID initialize")?;
-                let down = unsafe { ffi::sa_touch(x, y, ms * 1_000_000, 1) };
-                if down == 0 {
-                    sleep(ms)
-                }
-                let up = unsafe { ffi::sa_touch(0, 0, 0, 0) };
-                let unset = unsafe { ffi::hiddbgUnsetTouchScreenAutoPilotState() };
-                rc(down, "touch down")?;
-                rc(up, "touch release")?;
-                rc(unset, "touch unset")?;
-                reply(id, b"touch: ok")?;
-            }
             "install" => {
                 let url = words
                     .next()
@@ -282,7 +196,8 @@ pub(crate) fn apply_update(url: &str) -> Result<u64> {
     let _clean = Clean;
     log::add("update: downloading");
     let size = http::download(url, TMP, &mut chunk, 50 * 1024 * 1024)?;
-    if size < 100 * 1024 {
+    // Small headless builds can be below 100 KiB; validate the container below.
+    if size < 16 {
         return Err(Error("update image too small", 0));
     }
     {
@@ -371,7 +286,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, b"pong");
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.0-rs");
+            let _ = reply(id, b"swagent-1.1-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {
