@@ -82,6 +82,13 @@ u32 sa_open(const char *path, int write, FsFile *file) {
     if (write) { fsFsDeleteFile(fs,p); Result rc=fsFsCreateFile(fs,p,0,0); if (rc) return rc; }
     return fsFsOpenFile(fs,p,write ? FsOpenMode_Write|FsOpenMode_Append : FsOpenMode_Read,file);
 }
+u32 sa_sd_space(s64 *total, s64 *free_space) {
+    FsFileSystem *fs = fsdevGetDeviceFileSystem("sdmc");
+    if (!fs) return MAKERESULT(Module_Libnx,LibnxError_NotFound);
+    Result rc = fsFsGetTotalSpace(fs,"/",total);
+    if (!rc) rc = fsFsGetFreeSpace(fs,"/",free_space);
+    return rc;
+}
 u32 sa_remove(const char *path) {
     FsFileSystem *fs; char p[FS_MAX_PATH];
     if (fsdevTranslatePath(path,&fs,p)) return MAKERESULT(Module_Libnx,LibnxError_BadInput);

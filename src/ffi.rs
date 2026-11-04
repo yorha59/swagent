@@ -41,6 +41,7 @@ extern "C" {
     pub fn send(fd: i32, p: *const u8, n: usize, flags: i32) -> isize;
     pub fn mkdir(p: *const c_char, mode: u32) -> i32;
     pub fn sa_open(p: *const c_char, write: i32, f: *mut Service) -> u32;
+    pub fn sa_sd_space(total: *mut i64, free_space: *mut i64) -> u32;
     pub fn sa_remove(p: *const c_char) -> u32;
     pub fn sa_rename(a: *const c_char, b: *const c_char) -> u32;
     pub fn fsFileClose(f: *mut Service);

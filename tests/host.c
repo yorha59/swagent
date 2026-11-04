@@ -82,6 +82,11 @@ uint32_t svcGetProcessList(int32_t *count,uint64_t *pids,uint32_t capacity){
 uint32_t pminfoInitialize(void){return process_failure==4?100:0;}
 void pminfoExit(void){info_exits++;}
 uint32_t pminfoGetProgramId(uint64_t *program_id,uint64_t pid){
-    if(process_failure==5)return 101;
+    if(process_failure==5 || (process_failure==7 && pid==123))return 527;
     *program_id=pid==456?0x430000000000000bULL:0x0100123400000000ULL;return 0;
+}
+
+uint32_t sa_sd_space(int64_t *total,int64_t *free_space){
+    if(process_failure==8)return 102;
+    *total=64000000000LL;*free_space=512500000LL;return 0;
 }
