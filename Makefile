@@ -17,7 +17,7 @@ build/shim.o: native/shim.c
 	mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 build/swagent.elf: rust build/shim.o swagent.json
-	$(CC) $(ARCH) -specs=$(NX)/switch.specs -Wl,-Map,build/swagent.map build/shim.o $(RUSTLIB) -L$(PORT)/lib -L$(NX)/lib -lturbojpeg -ljpeg -lnx -lm -o $@
+	$(CC) $(ARCH) -specs=$(NX)/switch.specs -Wl,-Map,build/swagent.map,--wrap=exit,--wrap=_exit,--wrap=abort build/shim.o $(RUSTLIB) -L$(PORT)/lib -L$(NX)/lib -lturbojpeg -ljpeg -lnx -lm -o $@
 build/exefs/main: build/swagent.elf
 	mkdir -p build/exefs
 	$(TOOLS)/elf2nso $< $@
@@ -29,8 +29,12 @@ dist/atmosphere/contents/430000000000000B/exefs.nsp: build/exefs/main build/exef
 	$(TOOLS)/build_pfs0 build/exefs $@
 	touch $(@D)/flags/boot2.flag
 	cp $@ build/swagent.nsp
-check:
-	$(CARGO) test --target aarch64-apple-darwin
+check: all
+	mkdir -p build
+	cc -Wall -Wextra -c tests/host.c -o build/host.o
+	RUSTFLAGS="-C link-arg=$(CURDIR)/build/host.o -A dead_code" $(CARGO) test --target aarch64-apple-darwin
+	python3 tests/check_png.py
+	python3 tests/check_artifact.py
 clean:
 	rm -rf build dist
 	$(CARGO) clean

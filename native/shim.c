@@ -24,18 +24,20 @@ int main(void) { agent_main(); for (;;) svcSleepThread(3600000000000LL); }
 static Thread threads[2];
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
     Result rc = threadCreate(&threads[slot], fn, arg, NULL, 0x18000, 44, -2);
-    if (!rc) rc = threadStart(&threads[slot]);
+    if (!rc) { rc = threadStart(&threads[slot]); if (rc) threadClose(&threads[slot]); }
     return rc;
 }
 u32 sa_init(void) {
-    Result rc = smInitialize(); if (rc) return rc;
+    static bool sm_ok, fs_ok, sd_ok;
+    Result rc;
+    if (!sm_ok) { rc=smInitialize(); if(rc) return rc; sm_ok=true; }
     if (!hosversionGet() && !setsysInitialize()) {
         SetSysFirmwareVersion fw;
         if (!setsysGetFirmwareVersion(&fw)) hosversionSet(MAKEHOSVERSION(fw.major,fw.minor,fw.micro));
         setsysExit();
     }
-    rc = fsInitialize(); if (rc) return rc;
-    rc = fsdevMountSdmc(); if (rc) return rc;
+    if (!fs_ok) { rc=fsInitialize(); if(rc) return rc; fs_ok=true; }
+    if (!sd_ok) { rc=fsdevMountSdmc(); if(rc) return rc; sd_ok=true; }
     SocketInitConfig cfg = *socketGetDefaultInitConfig();
     cfg.tcp_tx_buf_size = cfg.tcp_rx_buf_size = 0x10000;
     cfg.tcp_tx_buf_max_size = cfg.tcp_rx_buf_max_size = 0x10000;
@@ -168,3 +170,9 @@ u32 sa_launch(u64 *pid) {
     NcmProgramLocation loc={.program_id=0x430000000000000B,.storageID=NcmStorageId_None};
     rc=pmshellLaunchProgram(0,&loc,pid); pmshellExit(); return rc;
 }
+
+/* Guard third-party libc/JPEG fatal fallbacks against process teardown. */
+extern void agent_park(void);
+void __wrap_exit(int status) { (void)status; agent_park(); __builtin_unreachable(); }
+void __wrap__exit(int status) { (void)status; agent_park(); __builtin_unreachable(); }
+void __wrap_abort(void) { agent_park(); __builtin_unreachable(); }
