@@ -119,9 +119,12 @@ Update downloads to `exefs.nsp.tmp`, validates PFS0/NSO/NPDM and the exact title
 ID, renames the old image to `exefs.nsp.bak`, swaps the new image, and launches
 it using PM shell. A failed launch attempts to restore the previous image.
 After success: mark retired, release the listening FD first, acknowledge/close
-the client, then sleep forever. The worker observes retirement between chunks
-and sleeps too. The replacement retries EADDRINUSE five times at 1 s intervals;
-startup has an initial 5 s service delay. The old image backup remains on SD.
+the client, wait briefly for the replacement to bind, then terminate itself
+cleanly via `pmshellTerminateProcess` (never `_exit`; an abnormal exit would be
+flagged by creport, and sleeping forever would accumulate zombie instances until
+the kernel refuses further launches). The replacement retries EADDRINUSE five
+times at 1 s intervals; startup has an initial 5 s service delay. The old image
+backup remains on SD.
 
 Application code never calls a process exit. Linker wrappers also divert libc
 `exit`/`_exit`/`abort` fallbacks into a parked thread, including library failure
