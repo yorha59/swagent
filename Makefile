@@ -1,4 +1,7 @@
 DEVKITPRO ?= $(HOME)/devkitpro
+export DEVKITPRO
+CARGO := $(HOME)/.cargo/bin/cargo
+export RUSTC := $(shell rustup which rustc)
 CC := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-gcc
 TOOLS := $(DEVKITPRO)/tools/bin
 NX := $(DEVKITPRO)/libnx
@@ -9,7 +12,7 @@ RUSTLIB := target/aarch64-unknown-none/release/libswagent.a
 .PHONY: all rust clean check
 all: dist/atmosphere/contents/430000000000000B/exefs.nsp
 rust:
-	cargo build --release
+	$(CARGO) build --release
 build/shim.o: native/shim.c
 	mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -27,7 +30,7 @@ dist/atmosphere/contents/430000000000000B/exefs.nsp: build/exefs/main build/exef
 	touch $(@D)/flags/boot2.flag
 	cp $@ build/swagent.nsp
 check:
-	cargo test --target aarch64-apple-darwin
+	$(CARGO) test --target aarch64-apple-darwin
 clean:
 	rm -rf build dist
-	cargo clean
+	$(CARGO) clean
