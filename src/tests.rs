@@ -97,58 +97,8 @@ fn framing_fragmentation_overflow_recovery() {
     assert!(f.feed(b'\n').unwrap().is_err());
 }
 #[test]
-fn bounded_queue_fifo_and_buttons() {
+fn bounded_queue_fifo() {
     protocol::test_queue();
-    assert_eq!(protocol::button("A").unwrap(), 1);
-    assert_eq!(protocol::button("ZR").unwrap(), 512);
-    assert!(protocol::button("typo").is_err());
-}
-#[test]
-fn base64_boundaries() {
-    for (input, expected) in [
-        ("", ""),
-        ("f", "Zg=="),
-        ("fo", "Zm8="),
-        ("foo", "Zm9v"),
-        ("foobar", "Zm9vYmFy"),
-    ] {
-        let mut output = Vec::new();
-        let mut b = image::Base64::new(|p: &[u8]| {
-            output.extend_from_slice(p);
-            Ok(())
-        });
-        for v in input.bytes() {
-            b.write(&[v]).unwrap()
-        }
-        b.finish().unwrap();
-        assert_eq!(output, expected.as_bytes());
-    }
-    let mut lengths = Vec::new();
-    let mut b = image::Base64::new(|p: &[u8]| {
-        lengths.push(p.len());
-        Ok(())
-    });
-    b.write(&[0; 2000]).unwrap();
-    b.finish().unwrap();
-    assert_eq!(lengths, [768, 768, 768, 364]);
-}
-#[test]
-fn png_independent_validation_fixture() {
-    assert_eq!(!image::crc32(b"123456789", !0), 0xcbf43926);
-    let mut png = Vec::new();
-    image::png(
-        &[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
-        2,
-        2,
-        |p| {
-            png.extend_from_slice(p);
-            Ok(())
-        },
-    )
-    .unwrap();
-    std::fs::create_dir_all("build").unwrap();
-    std::fs::write("build/test.png", png).unwrap();
-    assert!(image::png(&[0; 3], 1281, 1, |_| Ok(())).is_err());
 }
 #[test]
 fn streaming_http_and_truncation() {
@@ -386,7 +336,7 @@ fn ping_version_and_busy_while_install_worker_is_blocked() {
         .unwrap();
     let mut client = BufReader::new(client);
     let mut line = String::new();
-    for (command, expected) in [("ping", "pong\r\n"), ("version", "swagent-1.0-rs\r\n")] {
+    for (command, expected) in [("ping", "pong\r\n"), ("version", "swagent-1.1-rs\r\n")] {
         protocol::test_receive(command);
         client.read_line(&mut line).unwrap();
         assert_eq!(line, expected);
@@ -407,5 +357,35 @@ fn ping_version_and_busy_while_install_worker_is_blocked() {
     worker.join().unwrap();
     client.read_line(&mut line).unwrap();
     assert!(line.starts_with("install: ok "), "{line}");
+    protocol::test_session(-1);
+}
+
+#[test]
+fn removed_commands_are_unknown() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::{io::AsRawFd, net::UnixStream},
+    };
+    let _guard = SERIAL.lock().unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut client = BufReader::new(client);
+    for command in [
+        "shot",
+        "key A",
+        "key ZR 100",
+        "touch 100 200",
+        "touch 0 0 100",
+        "unknown",
+    ] {
+        protocol::test_receive(command);
+        protocol::test_run_one();
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, "error: unknown command\r\n", "{command}");
+    }
     protocol::test_session(-1);
 }

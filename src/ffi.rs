@@ -89,27 +89,5 @@ extern "C" {
     pub fn nsCountApplicationContentMeta(id: u64, count: *mut i32) -> u32;
     pub fn sa_ns(cmd: u32, p: *const u8, n: u32, buf: *mut u8, size: usize, count: *mut u32)
         -> u32;
-    pub fn sa_hid_init() -> u32;
-    pub fn sa_buttons(b: u64) -> u32;
-    pub fn sa_touch(x: u32, y: u32, ns: u64, down: i32) -> u32;
-    pub fn hiddbgUnsetTouchScreenAutoPilotState() -> u32;
-    pub fn sa_capture(p: *mut u8, n: usize, out: *mut u64) -> u32;
-    pub fn sa_jpeg() -> *mut c_void;
-    pub fn sa_jpeg_header(
-        h: *mut c_void,
-        p: *const u8,
-        n: usize,
-        w: *mut i32,
-        height: *mut i32,
-    ) -> i32;
-    pub fn sa_jpeg_decode(
-        h: *mut c_void,
-        p: *const u8,
-        n: usize,
-        out: *mut u8,
-        w: i32,
-        height: i32,
-    ) -> i32;
-    pub fn sa_jpeg_close(h: *mut c_void);
     pub fn sa_launch(pid: *mut u64) -> u32;
 }

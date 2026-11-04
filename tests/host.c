@@ -57,13 +57,3 @@ uint32_t sa_rename(const char *a,const char *b){char from[1024],to[1024];path(a,
 static uint32_t launch_result;
 void host_launch_result(uint32_t rc){launch_result=rc;}
 uint32_t sa_launch(uint64_t *pid){*pid=123;return launch_result;}
-
-uint32_t sa_hid_init(void){return 0;}
-uint32_t sa_buttons(uint64_t b){(void)b;return 0;}
-uint32_t sa_touch(uint32_t x,uint32_t y,uint64_t ns,int down){(void)x;(void)y;(void)ns;(void)down;return 0;}
-uint32_t hiddbgUnsetTouchScreenAutoPilotState(void){return 0;}
-uint32_t sa_capture(void *p,size_t n,uint64_t *out){(void)p;(void)n;(void)out;return 999;}
-void *sa_jpeg(void){return NULL;}
-int sa_jpeg_header(void *h,const void *p,size_t n,int *w,int *height){(void)h;(void)p;(void)n;(void)w;(void)height;return -1;}
-int sa_jpeg_decode(void *h,const void *p,size_t n,void *out,int w,int height){(void)h;(void)p;(void)n;(void)out;(void)w;(void)height;return -1;}
-void sa_jpeg_close(void *p){(void)p;}

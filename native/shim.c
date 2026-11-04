@@ -9,7 +9,6 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#include <turbojpeg.h>
 
 u32 __nx_applet_type = AppletType_None;
 void __libnx_initheap(void) {
@@ -130,48 +129,13 @@ u32 sa_ns(unsigned cmd,const void *in,u32 in_size,void *buf,size_t size,u32 *cou
     if (s==&owned) serviceClose(&owned);
     return rc;
 }
-static HiddbgHdlsHandle pad;
-static HiddbgHdlsState pad_state;
-static u8 hid_work[0x1000] __attribute__((aligned(0x1000)));
-static int hid_ready;
-u32 sa_hid_init(void) {
-    if(hid_ready) return 0;
-    Result rc=hiddbgInitialize(); if(rc) return rc;
-    HiddbgHdlsSessionId session;
-    rc=hiddbgAttachHdlsWorkBuffer(&session,hid_work,sizeof(hid_work));
-    if(rc) { hiddbgExit(); return rc; }
-    HiddbgHdlsDeviceInfo info={.deviceType=HidDeviceType_FullKey3,.npadInterfaceType=HidNpadInterfaceType_Bluetooth,
-        .singleColorBody=0xff000000,.singleColorButtons=0xffffffff};
-    rc=hiddbgAttachHdlsVirtualDevice(&pad,&info);
-    if(rc) { hiddbgReleaseHdlsWorkBuffer(session); hiddbgExit(); return rc; }
-    pad_state.battery_level=4; hid_ready=1; return 0;
-}
-u32 sa_buttons(u64 buttons) { pad_state.buttons=buttons; return hiddbgSetHdlsState(pad,&pad_state); }
-u32 sa_touch(u32 x,u32 y,u64 ns,int down) {
-    HidTouchState t={.delta_time=ns,.x=x,.y=y,.diameter_x=10,.diameter_y=10};
-    return hiddbgSetTouchScreenAutoPilotState(down?&t:NULL,down?1:0);
-}
-u32 sa_capture(void *jpeg,size_t size,u64 *out) {
-    Result rc=capsscInitialize(); if(rc) return rc;
-    rc=capsscCaptureJpegScreenShot(out,jpeg,size,ViLayerStack_Screenshot,1000000000LL);
-    capsscExit(); return rc;
-}
-/* TurboJPEG gives a nonfatal error return, unlike libjpeg's default exit handler. */
-void *sa_jpeg(void) { return tjInitDecompress(); }
-int sa_jpeg_header(void *h,const u8 *p,size_t n,int *w,int *height) {
-    int sub,colors; return tjDecompressHeader3(h,p,n,w,height,&sub,&colors);
-}
-int sa_jpeg_decode(void *h,const u8 *p,size_t n,u8 *out,int w,int height) {
-    return tjDecompress2(h,p,n,out,w,0,height,TJPF_RGB,TJFLAG_FASTDCT);
-}
-void sa_jpeg_close(void *h) { tjDestroy(h); }
 u32 sa_launch(u64 *pid) {
     Result rc=pmshellInitialize(); if(rc) return rc;
     NcmProgramLocation loc={.program_id=0x430000000000000B,.storageID=NcmStorageId_None};
     rc=pmshellLaunchProgram(0,&loc,pid); pmshellExit(); return rc;
 }
 
-/* Guard third-party libc/JPEG fatal fallbacks against process teardown. */
+/* Guard third-party libc fatal fallbacks against process teardown. */
 extern void agent_park(void);
 void __wrap_exit(int status) { (void)status; agent_park(); __builtin_unreachable(); }
 void __wrap__exit(int status) { (void)status; agent_park(); __builtin_unreachable(); }
