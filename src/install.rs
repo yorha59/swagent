@@ -382,7 +382,7 @@ pub fn install(url: &str, storage: u32) -> Result<u64> {
     }
     let mut chunk = Buffer::new(CHUNK)?;
     crate::log::add("install: downloading");
-    http::download(url, NSP, &mut chunk, 32 * 1024 * 1024 * 1024)?;
+    http::download(url, NSP, &mut chunk, 64 * 1024 * 1024 * 1024)?;
     install_downloaded(storage, &mut chunk)
 }
 pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> {
