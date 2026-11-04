@@ -94,5 +94,9 @@ extern "C" {
         -> u32;
     pub fn sa_launch(pid: *mut u64) -> u32;
     pub fn svcGetProcessId(pid: *mut u64, handle: u32) -> u32;
+    pub fn svcGetProcessList(count: *mut i32, pids: *mut u64, capacity: u32) -> u32;
+    pub fn pminfoInitialize() -> u32;
+    pub fn pminfoExit();
+    pub fn pminfoGetProgramId(program_id: *mut u64, pid: u64) -> u32;
     pub fn sa_terminate(pid: u64) -> u32;
 }

@@ -139,6 +139,66 @@ fn execute(job: Job) {
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
+            "ps" => {
+                if words.next().is_some() {
+                    return Err(Error("usage: ps", 0));
+                }
+                // Installed libnx has no PM enumeration API. The NPDM allows
+                // svcGetProcessList, which includes all resident processes.
+                let mut pids = [0u64; 1024];
+                let mut count = 0;
+                rc(
+                    unsafe {
+                        ffi::svcGetProcessList(&mut count, pids.as_mut_ptr(), pids.len() as u32)
+                    },
+                    "list processes",
+                )?;
+                if count < 0 || count as usize > pids.len() {
+                    return Err(Error("process list exceeds capacity", 0));
+                }
+                rc(unsafe { ffi::pminfoInitialize() }, "initialize pm:info")?;
+                struct Info;
+                impl Drop for Info {
+                    fn drop(&mut self) {
+                        unsafe { ffi::pminfoExit() }
+                    }
+                }
+                let _info = Info;
+                for &pid in &pids[..count as usize] {
+                    let mut program_id = 0;
+                    rc(
+                        unsafe { ffi::pminfoGetProgramId(&mut program_id, pid) },
+                        "get program id",
+                    )?;
+                    let mut s = Text::<64>::new();
+                    let _ = write!(s, "ps: {} {:016x}", pid, program_id);
+                    reply(id, s.bytes())?;
+                }
+                reply(id, b"ps: end")?;
+            }
+            "kill" => {
+                let pid = words
+                    .next()
+                    .ok_or(Error("usage: kill PID", 0))?
+                    .parse::<u64>()
+                    .map_err(|_| Error("invalid pid", 0))?;
+                if words.next().is_some() {
+                    return Err(Error("usage: kill PID", 0));
+                }
+                let mut own_pid = 0;
+                rc(
+                    unsafe { ffi::svcGetProcessId(&mut own_pid, 0xffff8001) },
+                    "get own pid",
+                )?;
+                if pid == own_pid {
+                    reply(id, b"kill: refusing self")?;
+                } else {
+                    rc(unsafe { ffi::sa_terminate(pid) }, "terminate process")?;
+                    let mut s = Text::<64>::new();
+                    let _ = write!(s, "kill: ok {}", pid);
+                    reply(id, s.bytes())?;
+                }
+            }
             "install" => {
                 let url = words
                     .next()
@@ -302,7 +362,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, b"pong");
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.3-rs");
+            let _ = reply(id, b"swagent-1.4-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {

@@ -10,6 +10,8 @@ extern "C" {
     fn host_reset(fail: u32);
     fn host_stat(n: u32) -> u32;
     fn host_launch_result(rc: u32);
+    fn host_process_reset(fail: u32);
+    fn host_process_stat(n: u32) -> u32;
 }
 fn server(body: Vec<u8>, chunked: bool, truncate: bool) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -99,6 +101,86 @@ fn framing_fragmentation_overflow_recovery() {
 #[test]
 fn bounded_queue_fifo() {
     protocol::test_queue();
+}
+#[test]
+fn process_commands_queue_self_guard_and_errors() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::{io::AsRawFd, net::UnixStream},
+    };
+    let _guard = SERIAL.lock().unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut client = BufReader::new(client);
+    for (fail, command, expected, terminated, exits) in [
+        (
+            0,
+            "ps",
+            "ps: 123 0100123400000000\r\nps: 456 430000000000000b\r\nps: end\r\n",
+            0,
+            1,
+        ),
+        (0, "kill 123", "kill: ok 123\r\n", 123, 0),
+        (0, "kill 456", "kill: refusing self\r\n", 0, 0),
+        (1, "kill 123", "kill: error get own pid rc=77\r\n", 0, 0),
+        (
+            2,
+            "kill 123",
+            "kill: error terminate process rc=88\r\n",
+            123,
+            0,
+        ),
+        (3, "ps", "ps: error list processes rc=99\r\n", 0, 0),
+        (4, "ps", "ps: error initialize pm:info rc=100\r\n", 0, 0),
+        (5, "ps", "ps: error get program id rc=101\r\n", 0, 1),
+        (
+            6,
+            "ps",
+            "ps: error process list exceeds capacity rc=0\r\n",
+            0,
+            0,
+        ),
+        (0, "kill", "kill: error usage: kill PID rc=0\r\n", 0, 0),
+        (0, "kill nope", "kill: error invalid pid rc=0\r\n", 0, 0),
+        (0, "kill -1", "kill: error invalid pid rc=0\r\n", 0, 0),
+        (
+            0,
+            "kill 18446744073709551616",
+            "kill: error invalid pid rc=0\r\n",
+            0,
+            0,
+        ),
+        (
+            0,
+            "kill 123 extra",
+            "kill: error usage: kill PID rc=0\r\n",
+            0,
+            0,
+        ),
+        (0, "ps extra", "ps: error usage: ps rc=0\r\n", 0, 0),
+    ] {
+        unsafe { host_process_reset(fail) };
+        protocol::test_receive(command);
+        // Immediate ping must precede the queued command's output.
+        protocol::test_receive("ping");
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, "pong\r\n", "{command}");
+        assert_eq!(unsafe { host_process_stat(0) }, 0);
+        protocol::test_run_one();
+        let mut actual = String::new();
+        for _ in expected.lines() {
+            client.read_line(&mut actual).unwrap();
+        }
+        assert_eq!(actual, expected, "{command}");
+        assert_eq!(unsafe { host_process_stat(0) }, terminated);
+        assert_eq!(unsafe { host_process_stat(1) }, exits);
+    }
+    unsafe { host_process_reset(0) };
+    protocol::test_session(-1);
 }
 #[test]
 fn streaming_http_and_truncation() {
@@ -378,7 +460,7 @@ fn ping_version_and_busy_while_install_worker_is_blocked() {
         .unwrap();
     let mut client = BufReader::new(client);
     let mut line = String::new();
-    for (command, expected) in [("ping", "pong\r\n"), ("version", "swagent-1.3-rs\r\n")] {
+    for (command, expected) in [("ping", "pong\r\n"), ("version", "swagent-1.4-rs\r\n")] {
         protocol::test_receive(command);
         client.read_line(&mut line).unwrap();
         assert_eq!(line, expected);

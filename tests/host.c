@@ -68,5 +68,20 @@ uint32_t sa_rename(const char *a,const char *b){char from[1024],to[1024];path(a,
 static uint32_t launch_result;
 void host_launch_result(uint32_t rc){launch_result=rc;}
 uint32_t sa_launch(uint64_t *pid){*pid=123;return launch_result;}
-uint32_t svcGetProcessId(uint64_t *pid,uint32_t handle){(void)handle;*pid=456;return 0;}
-uint32_t sa_terminate(uint64_t pid){(void)pid;return ENOSYS;}
+static uint32_t process_failure, terminated, info_exits;
+void host_process_reset(uint32_t fail){process_failure=fail;terminated=info_exits=0;}
+uint32_t host_process_stat(uint32_t n){return n?info_exits:terminated;}
+uint32_t svcGetProcessId(uint64_t *pid,uint32_t handle){if(handle!=0xffff8001)return 999;*pid=456;return process_failure==1?77:0;}
+uint32_t sa_terminate(uint64_t pid){terminated=(uint32_t)pid;return process_failure==2?88:0;}
+uint32_t svcGetProcessList(int32_t *count,uint64_t *pids,uint32_t capacity){
+    if(process_failure==3)return 99;
+    *count=process_failure==6?1025:2;
+    if(capacity>=2){pids[0]=123;pids[1]=456;}
+    return 0;
+}
+uint32_t pminfoInitialize(void){return process_failure==4?100:0;}
+void pminfoExit(void){info_exits++;}
+uint32_t pminfoGetProgramId(uint64_t *program_id,uint64_t pid){
+    if(process_failure==5)return 101;
+    *program_id=pid==456?0x430000000000000bULL:0x0100123400000000ULL;return 0;
+}
