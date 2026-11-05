@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,21 @@ u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
     if (!rc) { rc = threadStart(&threads[slot]); if (rc) threadClose(&threads[slot]); }
     return rc;
 }
+static bool socket_ok;
+static u32 sa_net_init(void) {
+    SocketInitConfig cfg = *socketGetDefaultInitConfig();
+    cfg.tcp_tx_buf_size = cfg.tcp_rx_buf_size = 0x10000;
+    cfg.tcp_tx_buf_max_size = cfg.tcp_rx_buf_max_size = 0x10000;
+    cfg.num_bsd_sessions = 3;
+    Result rc = socketInitialize(&cfg);
+    socket_ok = R_SUCCEEDED(rc);
+    return rc;
+}
+u32 sa_net_reinit(void) {
+    if (socket_ok) socketExit();
+    socket_ok = false;
+    return sa_net_init();
+}
 u32 sa_init(void) {
     static bool sm_ok, fs_ok, sd_ok;
     Result rc;
@@ -38,12 +54,10 @@ u32 sa_init(void) {
     }
     if (!fs_ok) { rc=fsInitialize(); if(rc) return rc; fs_ok=true; }
     if (!sd_ok) { rc=fsdevMountSdmc(); if(rc) return rc; sd_ok=true; }
-    SocketInitConfig cfg = *socketGetDefaultInitConfig();
-    cfg.tcp_tx_buf_size = cfg.tcp_rx_buf_size = 0x10000;
-    cfg.tcp_tx_buf_max_size = cfg.tcp_rx_buf_max_size = 0x10000;
-    cfg.num_bsd_sessions = 3;
-    return socketInitialize(&cfg);
+    return sa_net_init();
 }
+ssize_t sa_send(int fd, const void *p, size_t n, int flags) { return send(fd,p,n,flags); }
+ssize_t sa_recv(int fd, void *p, size_t n, int flags) { return recv(fd,p,n,flags); }
 int sa_errno(void) { return errno; }
 void sa_timeout(int fd, int seconds) {
     struct timeval t = {seconds,0};
@@ -57,21 +71,31 @@ int sa_listen(void) {
     if (bind(fd,(void*)&a,sizeof(a)) < 0 || listen(fd,4) < 0) {
         int e=errno; close(fd); return -e;
     }
+    /* Poll accept so worker connect failures can wake the recovery loop even
+     * when no client is connected. Do not rely on accept honoring RCVTIMEO. */
+    if (fcntl(fd,F_SETFL,O_NONBLOCK) < 0) { int e=errno; close(fd); return -e; }
     return fd;
 }
-int sa_accept(int fd) { return accept(fd,NULL,NULL); }
+int sa_accept(int fd) {
+    int client=accept(fd,NULL,NULL);
+    if (client>=0 && fcntl(client,F_SETFL,0)<0) {
+        int e=errno; close(client); errno=e; return -1;
+    }
+    return client;
+}
 int sa_connect(const char *host, const char *port) {
     struct addrinfo hint = {.ai_family=AF_INET,.ai_socktype=SOCK_STREAM}, *list=NULL;
-    if (getaddrinfo(host,port,&hint,&list)) return -1;
+    if (getaddrinfo(host,port,&hint,&list)) { errno=EHOSTUNREACH; return -1; }
+    int saved=EHOSTUNREACH;
     int fd=-1;
     for (struct addrinfo *p=list;p;p=p->ai_next) {
         fd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
-        if (fd<0) continue;
+        if (fd<0) { saved=errno; continue; }
         sa_timeout(fd,10);
         if (!connect(fd,p->ai_addr,p->ai_addrlen)) break;
-        close(fd); fd=-1;
+        saved=errno; close(fd); fd=-1;
     }
-    freeaddrinfo(list); return fd;
+    freeaddrinfo(list); if (fd<0) errno=saved; return fd;
 }
 /* File objects and all service objects are 16-byte libnx Service wrappers. */
 _Static_assert(sizeof(FsFile)==16 && sizeof(NcmContentStorage)==16, "service ABI");
@@ -79,7 +103,7 @@ _Static_assert(sizeof(NcmContentMetaKey)==16 && sizeof(NcmContentInfo)==24, "NCM
 u32 sa_open(const char *path, int write, FsFile *file) {
     FsFileSystem *fs; char p[FS_MAX_PATH];
     if (fsdevTranslatePath(path,&fs,p)) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
-    if (write) { fsFsDeleteFile(fs,p); Result rc=fsFsCreateFile(fs,p,0,0); if (rc) return rc; }
+    if (write == 1) { fsFsDeleteFile(fs,p); Result rc=fsFsCreateFile(fs,p,0,0); if (rc) return rc; }
     return fsFsOpenFile(fs,p,write ? FsOpenMode_Write|FsOpenMode_Append : FsOpenMode_Read,file);
 }
 u32 sa_sd_space(s64 *total, s64 *free_space) {

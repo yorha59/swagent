@@ -25,8 +25,9 @@ pub struct Record {
     pub storage: u64,
 }
 extern "C" {
-    pub fn malloc(n: usize) -> *mut u8;
-    pub fn free(p: *mut u8);
+    pub fn malloc(n: usize) -> *mut c_void;
+    pub fn free(p: *mut c_void);
+    pub fn sa_net_reinit() -> u32;
     pub fn sa_init() -> u32;
     pub fn sa_spawn(slot: u32, entry: extern "C" fn(*mut c_void), arg: *mut c_void) -> u32;
     pub fn svcSleepThread(ns: i64) -> u32;
@@ -37,8 +38,8 @@ extern "C" {
     pub fn sa_errno() -> i32;
     pub fn close(fd: i32) -> i32;
     pub fn shutdown(fd: i32, how: i32) -> i32;
-    pub fn recv(fd: i32, p: *mut u8, n: usize, flags: i32) -> isize;
-    pub fn send(fd: i32, p: *const u8, n: usize, flags: i32) -> isize;
+    pub fn sa_recv(fd: i32, p: *mut u8, n: usize, flags: i32) -> isize;
+    pub fn sa_send(fd: i32, p: *const u8, n: usize, flags: i32) -> isize;
     pub fn mkdir(p: *const c_char, mode: u32) -> i32;
     pub fn sa_open(p: *const c_char, write: i32, f: *mut Service) -> u32;
     pub fn sa_sd_space(total: *mut i64, free_space: *mut i64) -> u32;

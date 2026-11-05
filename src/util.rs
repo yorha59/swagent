@@ -31,7 +31,7 @@ pub struct Buffer {
 }
 impl Buffer {
     pub fn new(n: usize) -> Result<Self> {
-        let p = unsafe { ffi::malloc(n) };
+        let p = unsafe { ffi::malloc(n).cast::<u8>() };
         if p.is_null() {
             Err(Error("out of memory", 0))
         } else {
@@ -52,7 +52,7 @@ impl DerefMut for Buffer {
 }
 impl Drop for Buffer {
     fn drop(&mut self) {
-        unsafe { ffi::free(self.p) }
+        unsafe { ffi::free(self.p.cast()) }
     }
 }
 #[derive(Clone, Copy)]
@@ -68,7 +68,7 @@ impl<const N: usize> Text<N> {
         }
     }
     pub fn bytes(&self) -> &[u8] {
-        &self.data[..self.len]
+        self.data.get(..self.len).unwrap_or(&[])
     }
     pub fn str(&self) -> &str {
         core::str::from_utf8(self.bytes()).unwrap_or("")
@@ -77,10 +77,17 @@ impl<const N: usize> Text<N> {
         self.data.as_ptr().cast()
     }
     pub fn push(&mut self, s: &[u8]) -> Result {
-        if self.len + s.len() >= N {
+        let end = self
+            .len
+            .checked_add(s.len())
+            .ok_or(Error("text too long", 0))?;
+        if end >= N {
             return Err(Error("text too long", 0));
         }
-        self.data[self.len..self.len + s.len()].copy_from_slice(s);
+        self.data
+            .get_mut(self.len..end)
+            .ok_or(Error("text bounds", 0))?
+            .copy_from_slice(s);
         self.len += s.len();
         Ok(())
     }
@@ -115,14 +122,29 @@ impl<T> Lock<T> {
         r
     }
 }
-pub fn le16(p: &[u8]) -> u16 {
-    u16::from_le_bytes([p[0], p[1]])
+pub fn le16(p: &[u8]) -> Result<u16> {
+    Ok(u16::from_le_bytes(
+        p.get(..2)
+            .ok_or(Error("short integer", 0))?
+            .try_into()
+            .map_err(|_| Error("short integer", 0))?,
+    ))
 }
-pub fn le32(p: &[u8]) -> u32 {
-    u32::from_le_bytes(p[..4].try_into().unwrap())
+pub fn le32(p: &[u8]) -> Result<u32> {
+    Ok(u32::from_le_bytes(
+        p.get(..4)
+            .ok_or(Error("short integer", 0))?
+            .try_into()
+            .map_err(|_| Error("short integer", 0))?,
+    ))
 }
-pub fn le64(p: &[u8]) -> u64 {
-    u64::from_le_bytes(p[..8].try_into().unwrap())
+pub fn le64(p: &[u8]) -> Result<u64> {
+    Ok(u64::from_le_bytes(
+        p.get(..8)
+            .ok_or(Error("short integer", 0))?
+            .try_into()
+            .map_err(|_| Error("short integer", 0))?,
+    ))
 }
 pub fn hex(bytes: &[u8]) -> Text<80> {
     let mut s = Text::new();

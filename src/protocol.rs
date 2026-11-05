@@ -34,7 +34,10 @@ impl Queue {
         if self.len == 8 {
             return false;
         }
-        self.jobs[(self.head + self.len) % 8] = job;
+        let Some(slot) = self.jobs.get_mut((self.head + self.len) % 8) else {
+            return false;
+        };
+        *slot = job;
         self.len += 1;
         true
     }
@@ -42,7 +45,7 @@ impl Queue {
         if self.len == 0 {
             return None;
         }
-        let job = self.jobs[self.head];
+        let job = *self.jobs.get(self.head)?;
         self.head = (self.head + 1) % 8;
         self.len -= 1;
         Some(job)
@@ -98,7 +101,7 @@ pub fn reply(id: u64, line: &[u8]) -> Result {
         if s.id != id || s.fd < 0 {
             return Err(Error("client disconnected", 0));
         }
-        let sock = core::mem::ManuallyDrop::new(Socket(s.fd));
+        let sock = core::mem::ManuallyDrop::new(Socket::new(s.fd));
         sock.send(line)?;
         sock.send(b"\r\n")
     })
@@ -194,7 +197,10 @@ fn execute(job: Job) {
                     }
                 }
                 let _info = Info;
-                for &pid in &pids[..count as usize] {
+                for &pid in pids
+                    .get(..count as usize)
+                    .ok_or(Error("process list exceeds capacity", 0))?
+                {
                     let mut program_id = 0;
                     let result = unsafe { ffi::pminfoGetProgramId(&mut program_id, pid) };
                     let mut s = Text::<64>::new();
@@ -314,13 +320,13 @@ pub(crate) fn apply_update(url: &str) -> Result<u64> {
                 if &h[..4] != b"META" {
                     return Err(Error("invalid NPDM magic", 0));
                 }
-                let at = le32(&h[0x70..]) as u64;
+                let at = le32(&h[0x70..])? as u64;
                 if at + 0x20 > e.size {
                     return Err(Error("invalid NPDM ACI offset", 0));
                 }
                 let mut aci = [0; 0x20];
                 f.read(e.off + at, &mut aci)?;
-                npdm = &aci[..4] == b"ACI0" && le64(&aci[0x10..]) == 0x430000000000000b;
+                npdm = &aci[..4] == b"ACI0" && le64(&aci[0x10..])? == 0x430000000000000b;
             }
         }
         if !nso || !npdm {
@@ -386,14 +392,36 @@ fn disconnect() {
         }
     })
 }
+// Pure formatter; u128 arithmetic keeps percentages safe for every u64 input.
+pub(crate) fn format_status(phase: u8, rx: u64, total: u64) -> Text<128> {
+    let name = match phase {
+        1 => "downloading",
+        2 => "writing",
+        3 => "done",
+        4 => "error",
+        _ => "idle",
+    };
+    let mut s = Text::new();
+    let _ = write!(s, "status: {} rx={} total={}", name, rx, total);
+    if total > 0 {
+        let tenths = rx as u128 * 1000 / total as u128;
+        let _ = write!(s, " pct={}.{}", tenths / 10, tenths % 10);
+    }
+    s
+}
 fn receive(id: u64, line: Text<512>) {
     let mut words = line.str().split_ascii_whitespace();
     match words.next() {
         Some("ping") if words.next().is_none() => {
             let _ = reply(id, b"pong");
         }
+        Some("status") if words.next().is_none() => {
+            let (phase, rx, total) = install::progress();
+            let s = format_status(phase, rx, total);
+            let _ = reply(id, s.bytes());
+        }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.5-rs");
+            let _ = reply(id, b"swagent-1.7-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {
@@ -412,28 +440,30 @@ pub fn serve() -> ! {
         if retiring() {
             forever()
         }
-        // Initial attempt plus five EADDRINUSE retries at one-second intervals.
-        let mut server = -1;
-        for attempt in 0..=5 {
-            server = unsafe { ffi::sa_listen() };
-            if server >= 0 {
-                break;
-            }
-            if server != -112 || attempt == 5 {
-                break;
-            }
-            sleep(1000);
-        }
+        let server = unsafe { ffi::sa_listen() };
         if server < 0 {
-            log::add("listen failed; retrying");
+            crate::net::failed(-server);
+            crate::net::recover();
             sleep(5000);
             continue;
+        }
+        unsafe {
+            ffi::sa_timeout(server, 2);
         }
         LISTENER.store(server, Release);
         log::add("listening :6000");
         loop {
+            if crate::net::pending() {
+                break;
+            }
             let fd = unsafe { ffi::sa_accept(server) };
             if fd < 0 {
+                let e = unsafe { ffi::sa_errno() };
+                if crate::net::transient(e) {
+                    sleep(100);
+                    continue;
+                }
+                crate::net::failed(e);
                 break;
             }
             unsafe {
@@ -448,18 +478,25 @@ pub fn serve() -> ! {
             let mut frame = Frame::new();
             'client: loop {
                 let mut input = [0; 512];
-                let n = unsafe { ffi::recv(fd, input.as_mut_ptr(), input.len(), 0) };
+                let n = unsafe { ffi::sa_recv(fd, input.as_mut_ptr(), input.len(), 0) };
                 if n == 0 {
+                    break;
+                }
+                if crate::net::pending() {
                     break;
                 }
                 if n < 0 {
                     let e = unsafe { ffi::sa_errno() };
-                    if e == 11 || e == 35 || e == 116 {
+                    if crate::net::transient(e) {
                         continue;
                     }
+                    crate::net::failed(e);
                     break;
                 }
-                for byte in &input[..n as usize] {
+                let Some(input) = input.get(..n as usize) else {
+                    break;
+                };
+                for byte in input {
                     if let Some(result) = frame.feed(*byte) {
                         match result {
                             Ok(line) if line.len > 0 => receive(id, line),
@@ -476,11 +513,15 @@ pub fn serve() -> ! {
             }
             disconnect();
             log::add("client disconnected");
+            if crate::net::pending() {
+                break;
+            }
         }
         LISTENER.store(-1, Release);
         unsafe {
             ffi::close(server);
         }
+        crate::net::recover();
         sleep(1000);
     }
 }
@@ -536,4 +577,9 @@ pub fn test_run_one() {
     if let Some(job) = QUEUE.with(Queue::pop) {
         execute(job)
     }
+}
+
+#[cfg(test)]
+pub fn test_install_error(e: Error) {
+    error(42, "install", e);
 }
