@@ -4,6 +4,30 @@ use crate::{
     io::{self, File},
     util::*,
 };
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering::*};
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum Phase {
+    Idle = 0,
+    Downloading = 1,
+    Writing = 2,
+    Done = 3,
+    Error = 4,
+}
+pub static INSTALL_RX_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static INSTALL_TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static INSTALL_PHASE: AtomicU8 = AtomicU8::new(Phase::Idle as u8);
+
+pub fn progress() -> (u8, u64, u64) {
+    let phase = INSTALL_PHASE.load(Acquire);
+    (
+        phase,
+        INSTALL_RX_BYTES.load(Relaxed),
+        INSTALL_TOTAL_BYTES.load(Relaxed),
+    )
+}
+
 // PFS0 entries are u64 offset, u64 size, u32 name offset, u32 reserved.
 const PFS_ENTRY_SIZE: usize = 24;
 const NSP: &str = "sdmc:/switch/.install.tmp.nsp";
@@ -24,8 +48,8 @@ impl Pfs {
     pub fn open(f: &mut File) -> Result<Self> {
         let mut h = [0; 16];
         f.read(0, &mut h)?;
-        let count = le32(&h[4..]) as usize;
-        let strings = le32(&h[8..]) as usize;
+        let count = le32(&h[4..])? as usize;
+        let strings = le32(&h[8..])? as usize;
         if &h[..4] != b"PFS0" || count == 0 || count > 2048 {
             return Err(Error("invalid PFS0 header", 0));
         }
@@ -75,12 +99,20 @@ impl Pfs {
     }
 }
 pub fn entry(header: &[u8], count: usize, base: u64, i: usize) -> Result<Entry<'_>> {
-    if i >= count || 16 + PFS_ENTRY_SIZE * count > header.len() {
+    let table_end = count
+        .checked_mul(PFS_ENTRY_SIZE)
+        .and_then(|n| n.checked_add(16))
+        .ok_or(Error("PFS0 table bounds", 0))?;
+    if i >= count || table_end > header.len() {
         return Err(Error("PFS0 table bounds", 0));
     }
-    let p = &header[16 + i * PFS_ENTRY_SIZE..16 + (i + 1) * PFS_ENTRY_SIZE];
-    let strings = &header[16 + count * PFS_ENTRY_SIZE..];
-    let name = le32(&p[16..]) as usize;
+    let p = header
+        .get(16 + i * PFS_ENTRY_SIZE..16 + (i + 1) * PFS_ENTRY_SIZE)
+        .ok_or(Error("PFS0 table bounds", 0))?;
+    let strings = header
+        .get(table_end..)
+        .ok_or(Error("PFS0 table bounds", 0))?;
+    let name = le32(&p[16..])? as usize;
     let rest = strings.get(name..).ok_or(Error("PFS0 name offset", 0))?;
     let end = rest
         .iter()
@@ -97,9 +129,9 @@ pub fn entry(header: &[u8], count: usize, base: u64, i: usize) -> Result<Entry<'
     Ok(Entry {
         name: core::str::from_utf8(&rest[..end]).map_err(|_| Error("PFS0 filename encoding", 0))?,
         off: base
-            .checked_add(le64(p))
+            .checked_add(le64(p)?)
             .ok_or(Error("PFS0 offset overflow", 0))?,
-        size: le64(&p[8..]),
+        size: le64(&p[8..])?,
     })
 }
 struct Cleanup;
@@ -167,7 +199,7 @@ fn ticket(f: &mut File, p: &Pfs) -> Result {
         }
         let mut tik = Buffer::new(t.size as usize)?;
         f.read(t.off, &mut tik)?;
-        let sig = le32(&tik[..4]);
+        let sig = le32(&tik[..4])?;
         let body = 4 + match sig {
             0x10000 | 0x10003 => 0x23c,
             0x10001 | 0x10004 => 0x13c,
@@ -197,7 +229,8 @@ fn ticket(f: &mut File, p: &Pfs) -> Result {
         }
         let mut certificate = Buffer::new(c.size as usize)?;
         f.read(c.off, &mut certificate)?;
-        tik[body + 0x146] &= !0x10;
+        *tik.get_mut(body + 0x146)
+            .ok_or(Error("truncated ticket", 0))? &= !0x10;
         let result = unsafe {
             ffi::sa_ticket(
                 tik.as_ptr(),
@@ -229,9 +262,9 @@ pub fn meta(data: &[u8]) -> Result<Meta<'_>> {
         return Err(Error("short CNMT", 0));
     }
     let kind = data[12];
-    let ext = le16(&data[14..]) as usize;
-    let count = le16(&data[16..]) as usize;
-    let metas = le16(&data[18..]) as usize;
+    let ext = le16(&data[14..])? as usize;
+    let count = le16(&data[16..])? as usize;
+    let metas = le16(&data[18..])? as usize;
     let expected = match kind {
         0x80 => ext == 16,
         0x81 => ext == 24,
@@ -247,7 +280,7 @@ pub fn meta(data: &[u8]) -> Result<Meta<'_>> {
         return Err(Error("truncated CNMT tables", 0));
     }
     let extended = if kind == 0x81 {
-        le32(&data[32 + 12..]) as usize
+        le32(&data[32 + 12..])? as usize
     } else {
         0
     };
@@ -260,26 +293,32 @@ pub fn meta(data: &[u8]) -> Result<Meta<'_>> {
     }
     Ok(Meta {
         key: Key {
-            id: le64(data),
-            version: le32(&data[8..]),
+            id: le64(data)?,
+            version: le32(&data[8..])?,
             kind,
             install: 0,
             pad: [0; 2],
         },
-        ext: &data[32..32 + ext],
-        contents: &data[32 + ext..content_end],
-        metas: &data[content_end..meta_end],
+        ext: data.get(32..32 + ext).ok_or(Error("CNMT bounds", 0))?,
+        contents: data
+            .get(32 + ext..content_end)
+            .ok_or(Error("CNMT bounds", 0))?,
+        metas: data
+            .get(content_end..meta_end)
+            .ok_or(Error("CNMT bounds", 0))?,
         attributes: data[20],
         extended,
     })
 }
 fn content_name(info: &[u8]) -> Result<Text<80>> {
+    let info = info.get(..24).ok_or(Error("short content info", 0))?;
     let mut name = hex(&info[..16]);
     name.push(if info[22] == 0 { b".cnmt.nca" } else { b".nca" })?;
     Ok(name)
 }
-fn content_size(info: &[u8]) -> u64 {
-    le32(&info[16..]) as u64 | ((info[20] as u64) << 32)
+fn content_size(info: &[u8]) -> Result<u64> {
+    let info = info.get(..24).ok_or(Error("short content info", 0))?;
+    Ok(le32(&info[16..])? as u64 | ((info[20] as u64) << 32))
 }
 fn records(key: Key, storage: u32) -> Result {
     rc(unsafe { ffi::nsInitialize() }, "ns initialize")?;
@@ -323,12 +362,15 @@ fn records(key: Key, storage: u32) -> Result {
     let original = records;
     let mut n = 0;
     for i in 0..written as usize {
-        if records[i].key.id != key.id || records[i].key.kind != key.kind {
-            records[n] = records[i];
+        if records.get(i).ok_or(Error("record bounds", 0))?.key.id != key.id
+            || records.get(i).ok_or(Error("record bounds", 0))?.key.kind != key.kind
+        {
+            let record = *records.get(i).ok_or(Error("record bounds", 0))?;
+            *records.get_mut(n).ok_or(Error("record bounds", 0))? = record;
             n += 1;
         }
     }
-    records[n] = Record {
+    *records.get_mut(n).ok_or(Error("record bounds", 0))? = Record {
         key,
         storage: storage as u64,
     };
@@ -376,17 +418,35 @@ fn records(key: Key, storage: u32) -> Result {
     rc(pushed, "ns PushApplicationRecord")
 }
 pub fn install(url: &str, storage: u32) -> Result<u64> {
-    let _cleanup = Cleanup;
+    INSTALL_RX_BYTES.store(0, Relaxed);
+    INSTALL_TOTAL_BYTES.store(0, Relaxed);
+    INSTALL_PHASE.store(Phase::Downloading as u8, Release);
+    let result = install_inner(url, storage);
+    INSTALL_PHASE.store(
+        if result.is_ok() {
+            Phase::Done
+        } else {
+            Phase::Error
+        } as u8,
+        Release,
+    );
+    result
+}
+fn install_inner(url: &str, storage: u32) -> Result<u64> {
     unsafe {
         ffi::mkdir(c"sdmc:/switch".as_ptr(), 0o777);
     }
     let mut chunk = Buffer::new(CHUNK)?;
     crate::log::add("install: downloading");
-    http::download(url, NSP, &mut chunk, 64 * 1024 * 1024 * 1024)?;
+    http::download_install(url, NSP, &mut chunk, 64 * 1024 * 1024 * 1024)?;
+    INSTALL_PHASE.store(Phase::Writing as u8, Release);
     install_downloaded(storage, &mut chunk)
 }
 pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> {
     let _cleanup = Cleanup;
+    if chunk.is_empty() {
+        return Err(Error("empty install buffer", 0));
+    }
     let mut f = File::open(NSP, false)?;
     let p = Pfs::open(&mut f)?;
     for i in 0..p.count {
@@ -415,8 +475,16 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
         let mut off = 0;
         while off < cnca.size {
             let n = (cnca.size - off).min(chunk.len() as u64) as usize;
-            f.read(cnca.off + off, &mut chunk[..n])?;
-            out.write(off, &chunk[..n])?;
+            f.read(
+                cnca.off + off,
+                chunk
+                    .get_mut(..n)
+                    .ok_or(Error("install buffer bounds", 0))?,
+            )?;
+            out.write(
+                off,
+                chunk.get(..n).ok_or(Error("install buffer bounds", 0))?,
+            )?;
             off += n as u64;
             if crate::retiring() {
                 return Err(Error("retired", 0));
@@ -444,8 +512,16 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
                 return Err(Error("retired", 0));
             }
             let n = (cnca.size - off).min(chunk.len() as u64) as usize;
-            input.read(off, &mut chunk[..n])?;
-            out.write(off, &chunk[..n])?;
+            input.read(
+                off,
+                chunk
+                    .get_mut(..n)
+                    .ok_or(Error("install buffer bounds", 0))?,
+            )?;
+            out.write(
+                off,
+                chunk.get(..n).ok_or(Error("install buffer bounds", 0))?,
+            )?;
             off += n as u64;
         }
         out.flush()?;
@@ -486,7 +562,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
         }
         let name = content_name(info)?;
         let e = p.find(name.str())?;
-        if e.size != content_size(info) {
+        if e.size != content_size(info)? {
             return Err(Error("NCA size mismatch", 0));
         }
     }
@@ -545,7 +621,12 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
                 return Err(Error("retired", 0));
             }
             let n = (e.size - off).min(chunk.len() as u64) as usize;
-            f.read(e.off + off, &mut chunk[..n])?;
+            f.read(
+                e.off + off,
+                chunk
+                    .get_mut(..n)
+                    .ok_or(Error("install buffer bounds", 0))?,
+            )?;
             rc(
                 unsafe {
                     ffi::ncmContentStorageWritePlaceHolder(
@@ -572,26 +653,43 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     }
     let mut out = Buffer::new(size)?;
     out.fill(0);
-    out[..2].copy_from_slice(&(m.ext.len() as u16).to_le_bytes());
-    out[2..4].copy_from_slice(&(count as u16).to_le_bytes());
-    out[4..6].copy_from_slice(&((m.metas.len() / 16) as u16).to_le_bytes());
-    out[6] = m.attributes;
-    out[7] = storage as u8;
-    out[8..8 + m.ext.len()].copy_from_slice(m.ext);
+    out.get_mut(..2)
+        .ok_or(Error("rebuilt CNMT bounds", 0))?
+        .copy_from_slice(&(m.ext.len() as u16).to_le_bytes());
+    out.get_mut(2..4)
+        .ok_or(Error("rebuilt CNMT bounds", 0))?
+        .copy_from_slice(&(count as u16).to_le_bytes());
+    out.get_mut(4..6)
+        .ok_or(Error("rebuilt CNMT bounds", 0))?
+        .copy_from_slice(&((m.metas.len() / 16) as u16).to_le_bytes());
+    *out.get_mut(6).ok_or(Error("rebuilt CNMT bounds", 0))? = m.attributes;
+    *out.get_mut(7).ok_or(Error("rebuilt CNMT bounds", 0))? = storage as u8;
+    out.get_mut(8..8 + m.ext.len())
+        .ok_or(Error("rebuilt CNMT bounds", 0))?
+        .copy_from_slice(m.ext);
     let mut at = 8 + m.ext.len();
     for info in core::iter::once(&own[..])
         .chain(m.contents.chunks_exact(56).map(|c| &c[32..]))
         .filter(|c| c[22] != 6)
     {
-        out[at..at + 24].copy_from_slice(info);
+        out.get_mut(at..at + 24)
+            .ok_or(Error("rebuilt CNMT bounds", 0))?
+            .copy_from_slice(info);
         at += 24;
     }
-    out[at..at + m.metas.len()].copy_from_slice(m.metas);
+    out.get_mut(at..at + m.metas.len())
+        .ok_or(Error("rebuilt CNMT bounds", 0))?
+        .copy_from_slice(m.metas);
     // Preserve actual extended data rather than fabricate delta records.
     if m.extended > 0 {
         let from = 32 + m.ext.len() + m.contents.len() + m.metas.len();
         let at = at + m.metas.len();
-        out[at..at + m.extended].copy_from_slice(&data[from..from + m.extended]);
+        out.get_mut(at..at + m.extended)
+            .ok_or(Error("rebuilt CNMT bounds", 0))?
+            .copy_from_slice(
+                data.get(from..from + m.extended)
+                    .ok_or(Error("CNMT extended data bounds", 0))?,
+            );
     }
     rc(
         unsafe { ffi::ncmContentMetaDatabaseSet(&mut db.0, &m.key, out.as_ptr(), size as u64) },

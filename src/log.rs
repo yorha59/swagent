@@ -22,7 +22,9 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 static SLOTS: [Slot; COUNT] = [const { Slot::new() }; COUNT];
 pub fn add(s: &str) {
     let seq = NEXT.fetch_add(1, AcqRel);
-    let slot = &SLOTS[seq as usize % COUNT];
+    let Some(slot) = SLOTS.get(seq as usize % COUNT) else {
+        return;
+    };
     if slot
         .writing
         .compare_exchange(false, true, Acquire, Relaxed)
@@ -43,14 +45,16 @@ pub fn dump(n: usize, mut send: impl FnMut(&[u8])) {
     let end = NEXT.load(Acquire);
     let start = end.saturating_sub(n.min(COUNT) as u64).max(1);
     for seq in start..end {
-        let slot = &SLOTS[seq as usize % COUNT];
+        let Some(slot) = SLOTS.get(seq as usize % COUNT) else {
+            return;
+        };
         if slot.writing.load(Acquire) || slot.seq.load(Acquire) != seq {
             continue;
         }
         let mut line = Text::<192>::new();
         let n = slot.len.load(Relaxed).min(191) as usize;
-        for i in 0..n {
-            line.data[i] = slot.bytes[i].load(Relaxed)
+        for (out, byte) in line.data.iter_mut().zip(slot.bytes.iter()).take(n) {
+            *out = byte.load(Relaxed);
         }
         line.len = n;
         fence(SeqCst);

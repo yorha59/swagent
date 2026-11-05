@@ -1,5 +1,4 @@
 use crate::{
-    ffi,
     io::{File, Socket},
     util::*,
 };
@@ -33,21 +32,94 @@ pub fn parse(url: &str) -> Result<Url> {
     Ok(u)
 }
 pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u64> {
-    let u = parse(url)?;
-    let fd = unsafe { ffi::sa_connect(u.host.c(), u.port.c()) };
-    if fd < 0 {
-        return Err(Error("HTTP connect", 0));
+    download_inner(url, path, chunk, limit, false, 0)
+}
+pub fn download_install(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u64> {
+    static LAST_URL: Lock<Text<1600>> = Lock::new(Text::new());
+    LAST_URL.with(|last| -> Result {
+        let same = last.str() == url;
+        let mut next = Text::new();
+        next.push(url.as_bytes())?;
+        if !same {
+            File::open(path, true)?;
+        }
+        *last = next;
+        Ok(())
+    })?;
+    for failure in 1..=30 {
+        let offset = match File::open(path, false) {
+            Ok(mut f) => f.size()?,
+            Err(_) => 0,
+        };
+        match download_inner(url, path, chunk, limit, true, offset) {
+            Ok(n) => return Ok(n),
+            Err(e) => {
+                if !retryable(e) || failure == 30 || crate::retiring() {
+                    return Err(e);
+                }
+                let offset = match File::open(path, false) {
+                    Ok(mut f) => f.size()?,
+                    Err(_) => 0,
+                };
+                let mut line = Text::<128>::new();
+                let _ = write!(line, "install: retry {} from offset {}", failure, offset);
+                crate::log::add(line.str());
+                sleep(5000);
+            }
+        }
     }
-    let sock = Socket(fd);
+    unreachable!()
+}
+fn retryable(e: Error) -> bool {
+    matches!(
+        e.0,
+        "network receive"
+            | "network send"
+            | "network reset"
+            | "network unavailable"
+            | "HTTP connect"
+            | "short HTTP header"
+            | "short HTTP chunk"
+            | "short chunk header"
+            | "short chunk delimiter"
+            | "truncated HTTP trailers"
+            | "truncated HTTP body"
+    ) || (e.0 == "HTTP status" && e.1 >= 500)
+}
+fn download_inner(
+    url: &str,
+    path: &str,
+    chunk: &mut [u8],
+    limit: u64,
+    track: bool,
+    offset: u64,
+) -> Result<u64> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let u = parse(url)?;
+    if chunk.is_empty() {
+        return Err(Error("empty download buffer", 0));
+    }
+    if offset > limit {
+        return Err(Error("download size limit", 0));
+    }
+    if track {
+        crate::install::INSTALL_RX_BYTES.store(offset, Relaxed);
+    }
+    let sock = Socket::connect(u.host.c(), u.port.c())?;
     let mut request = Text::<1600>::new();
     write!(
         request,
-        "GET {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nAccept-Encoding: identity\r\n",
         u.path.str(),
         u.host.str(),
         u.port.str()
     )
     .map_err(|_| Error("HTTP request too long", 0))?;
+    if offset > 0 {
+        write!(request, "Range: bytes={offset}-\r\n")
+            .map_err(|_| Error("HTTP request too long", 0))?;
+    }
+    request.push(b"\r\n")?;
     sock.send(request.bytes())?;
     let mut header = Text::<8193>::new();
     let mut byte = [0];
@@ -60,9 +132,15 @@ pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u
     let h = core::str::from_utf8(header.bytes()).map_err(|_| Error("invalid HTTP header", 0))?;
     let mut lines = h.split("\r\n");
     let status = lines.next().unwrap_or("");
-    if !(status.starts_with("HTTP/1.0 200 ") || status.starts_with("HTTP/1.1 200 ")) {
-        return Err(Error("HTTP status must be 200", 0));
+    let code = status
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.parse::<u32>().ok())
+        .ok_or(Error("invalid HTTP status", 0))?;
+    if !matches!(code, 200 | 206 | 416) {
+        return Err(Error("HTTP status", code));
     }
+    let mut range = None;
     let mut length = None;
     let mut chunked = false;
     for line in lines.filter(|s| !s.is_empty()) {
@@ -70,6 +148,9 @@ pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u
             .split_once(':')
             .ok_or(Error("invalid HTTP header", 0))?;
         let value = value.trim();
+        if key.eq_ignore_ascii_case("content-range") {
+            range = Some(value);
+        }
         if key.eq_ignore_ascii_case("content-length") {
             let n = value
                 .parse::<u64>()
@@ -92,17 +173,61 @@ pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u
     if chunked && length.is_some() {
         return Err(Error("ambiguous HTTP framing", 0));
     }
-    if length.is_some_and(|n| n == 0 || n > limit) {
+    let start = if code == 206 { offset } else { 0 };
+    let mut expected_total = length;
+    if code == 206 || code == 416 {
+        let r = range
+            .and_then(|v| v.strip_prefix("bytes "))
+            .ok_or(Error("missing Content-Range", 0))?;
+        let (span, total) = r.split_once('/').ok_or(Error("invalid Content-Range", 0))?;
+        let total = total
+            .parse::<u64>()
+            .map_err(|_| Error("invalid Content-Range", 0))?;
+        if total == 0 || total > limit {
+            return Err(Error("download size limit", 0));
+        }
+        if code == 416 {
+            if span == "*" && offset == total {
+                if track {
+                    crate::install::INSTALL_TOTAL_BYTES.store(total, Relaxed);
+                }
+                return Ok(total);
+            }
+            return Err(Error("HTTP range not satisfiable", 416));
+        }
+        let (first, last) = span
+            .split_once('-')
+            .ok_or(Error("invalid Content-Range", 0))?;
+        let first = first
+            .parse::<u64>()
+            .map_err(|_| Error("invalid Content-Range", 0))?;
+        let last = last
+            .parse::<u64>()
+            .map_err(|_| Error("invalid Content-Range", 0))?;
+        if offset == 0
+            || first != offset
+            || last < first
+            || last != total - 1
+            || length.is_some_and(|n| n != total - first)
+        {
+            return Err(Error("invalid Content-Range", 0));
+        }
+        expected_total = Some(total);
+    }
+    if length.is_some_and(|n| n == 0 || n > limit - start) {
         return Err(Error("download size limit", 0));
     }
-    let mut file = File::open(path, true)?;
-    let mut total = 0;
+    if track {
+        crate::install::INSTALL_TOTAL_BYTES.store(expected_total.unwrap_or(0), Relaxed);
+        crate::install::INSTALL_RX_BYTES.store(start, Relaxed);
+    }
+    let mut file = File::open_mode(path, if start > 0 { 2 } else { 1 })?;
+    let mut total = start;
     if chunked {
-        let mut buffered = 0;
         loop {
             let mut line = Text::<128>::new();
             while !line.bytes().ends_with(b"\r\n") {
-                if sock.read(&mut byte)? == 0 {
+                if receive(&sock, &mut file, &mut byte)? == 0 {
                     return Err(Error("short chunk header", 0));
                 }
                 line.push(&byte)?;
@@ -115,7 +240,7 @@ pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u
                 loop {
                     let mut trailer = Text::<1024>::new();
                     while !trailer.bytes().ends_with(b"\r\n") {
-                        if sock.read(&mut byte)? == 0 {
+                        if receive(&sock, &mut file, &mut byte)? == 0 {
                             return Err(Error("truncated HTTP trailers", 0));
                         }
                         trailer.push(&byte)?;
@@ -128,26 +253,26 @@ pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u
                         break;
                     }
                 }
-                if buffered > 0 {
-                    file.write(total - buffered as u64, &chunk[..buffered])?;
-                }
                 break;
             }
             if remaining > limit - total {
                 return Err(Error("download size limit", 0));
             }
             while remaining > 0 {
-                let n = (remaining as usize).min(chunk.len() - buffered);
-                let got = sock.read(&mut chunk[buffered..buffered + n])?;
+                let n = (remaining as usize).min(chunk.len());
+                let got = receive(
+                    &sock,
+                    &mut file,
+                    chunk.get_mut(..n).ok_or(Error("HTTP buffer bounds", 0))?,
+                )?;
                 if got == 0 {
                     return Err(Error("short HTTP chunk", 0));
                 }
-                total += got as u64;
-                buffered += got;
-                if buffered == chunk.len() {
-                    file.write(total - buffered as u64, &chunk[..buffered])?;
-                    buffered = 0;
+                if track {
+                    crate::install::INSTALL_RX_BYTES.fetch_add(got as u64, Relaxed);
                 }
+                file.write(total, &chunk[..got])?;
+                total += got as u64;
                 remaining -= got as u64;
                 if crate::retiring() {
                     return Err(Error("retired", 0));
@@ -155,7 +280,7 @@ pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u
             }
             let mut crlf = [0; 2];
             for b in &mut crlf {
-                if sock.read(core::slice::from_mut(b))? != 1 {
+                if receive(&sock, &mut file, core::slice::from_mut(b))? != 1 {
                     return Err(Error("short chunk delimiter", 0));
                 }
             }
@@ -166,41 +291,51 @@ pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u
     } else {
         loop {
             let want = length.map_or(chunk.len(), |n| {
-                (n - total).min(chunk.len() as u64) as usize
+                (n - (total - start)).min(chunk.len() as u64) as usize
             });
             if want == 0 {
                 break;
             }
-            let mut got = 0;
-            while got < want {
-                let n = sock.read(&mut chunk[got..want])?;
-                if n == 0 {
-                    break;
-                }
-                got += n;
-                if crate::retiring() {
-                    return Err(Error("retired", 0));
-                }
-            }
+            let got = receive(&sock, &mut file, &mut chunk[..want])?;
             if got == 0 {
                 break;
             }
             if got as u64 > limit - total {
                 return Err(Error("download size limit", 0));
             }
-            file.write(total, &chunk[..got])?;
+            file.write(
+                total,
+                chunk.get(..got).ok_or(Error("HTTP buffer bounds", 0))?,
+            )?;
             total += got as u64;
+            if track {
+                crate::install::INSTALL_RX_BYTES.store(total, Relaxed);
+            }
             if crate::retiring() {
                 return Err(Error("retired", 0));
             }
         }
-        if length.is_some_and(|n| n != total) {
+        if length.is_some_and(|n| n != total - start) {
             return Err(Error("truncated HTTP body", 0));
         }
+    }
+    if expected_total.is_some_and(|n| n != total) {
+        return Err(Error("truncated HTTP body", 0));
     }
     if total == 0 {
         return Err(Error("empty HTTP body", 0));
     }
     file.flush()?;
     Ok(total)
+}
+
+// Commit the saved prefix before returning a receive error to the retry loop.
+fn receive(sock: &Socket, file: &mut File, bytes: &mut [u8]) -> Result<usize> {
+    match sock.read(bytes) {
+        Err(e) => {
+            file.flush()?;
+            Err(e)
+        }
+        ok => ok,
+    }
 }

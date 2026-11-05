@@ -16,15 +16,33 @@ static void path(const char *p,char *out) {
     const char *root=getenv("SWAGENT_TEST_ROOT");if(!root)root="build/host-sd";
     const char *colon=strchr(p,':');snprintf(out,1024,"%s%s",root,colon?colon+1:p);
 }
-uint32_t svcSleepThread(int64_t n){usleep(n/1000);return 0;}
+uint32_t svcSleepThread(int64_t n){if(n!=5000000000LL)usleep(n/1000);return 0;}
+static _Thread_local const char *receive_fixture;
+static _Thread_local size_t receive_offset;
+static _Thread_local char fixture_request[2048];
+const char *host_fixture_request(void){return fixture_request;}
+static _Thread_local int receive_error, connect_failure, fixture_connects;
+int host_fixture_connects(void){return fixture_connects;}
+void host_connect_failure(int error){connect_failure=error;}
+void host_receive_fixture(const char *p,int error){receive_fixture=p;receive_offset=0;fixture_connects=0;receive_error=error;}
+ssize_t sa_recv(int fd,void *p,size_t n,int flags){
+    if(!receive_fixture)return recv(fd,p,n,flags);
+    size_t left=strlen(receive_fixture)-receive_offset;
+    if(!left){errno=receive_error;return -1;}
+    if(n>left)n=left;
+    memcpy(p,receive_fixture+receive_offset,n);receive_offset+=n;return n;
+}
+ssize_t sa_send(int fd,const void *p,size_t n,int flags){if(receive_fixture){size_t len=n<sizeof(fixture_request)-1?n:sizeof(fixture_request)-1;memcpy(fixture_request,p,len);fixture_request[len]=0;return n;}return send(fd,p,n,flags);}
 int sa_errno(void){return errno;}
 int sa_connect(const char *host,const char *port){
+    if(connect_failure){errno=connect_failure;return -1;}
+    if(receive_fixture){fixture_connects++;receive_offset=0;return open("/dev/null",O_RDONLY);}
     struct addrinfo hints={.ai_family=AF_INET,.ai_socktype=SOCK_STREAM},*ai=NULL;
     if(getaddrinfo(host,port,&hints,&ai))return -1;
     int fd=socket(AF_INET,SOCK_STREAM,0);int rc=connect(fd,ai->ai_addr,ai->ai_addrlen);
     freeaddrinfo(ai);if(rc){close(fd);return -1;}return fd;
 }
-uint32_t sa_open(const char *p,int write,Service *s){char out[1024];path(p,out);int fd=open(out,write?O_CREAT|O_TRUNC|O_RDWR:O_RDONLY,0600);if(fd<0)return errno;s->fd=fd;return 0;}
+uint32_t sa_open(const char *p,int write,Service *s){char out[1024];path(p,out);int fd=open(out,write?(O_CREAT|O_RDWR|(write==1?O_TRUNC:0)):O_RDONLY,0600);if(fd<0)return errno;s->fd=fd;return 0;}
 uint32_t sa_remove(const char *p){char out[1024];path(p,out);return unlink(out)?errno:0;}
 void fsFileClose(Service *s){close(s->fd);}
 uint32_t fsFileRead(Service *s,int64_t off,uint8_t *p,uint64_t n,uint32_t opt,uint64_t *out){(void)opt;ssize_t r=pread(s->fd,p,n,off);if(r<0)return errno;*out=r;return 0;}
@@ -90,3 +108,7 @@ uint32_t sa_sd_space(int64_t *total,int64_t *free_space){
     if(process_failure==8)return 102;
     *total=64000000000LL;*free_space=512500000LL;return 0;
 }
+
+static uint32_t reinit_failures;
+void host_reinit_failures(uint32_t n){reinit_failures=n;}
+uint32_t sa_net_reinit(void){if(reinit_failures){reinit_failures--;return 123;}return 0;}
