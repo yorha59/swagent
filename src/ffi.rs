@@ -24,7 +24,19 @@ pub struct Record {
     pub key: Key,
     pub storage: u64,
 }
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct SleepSettings {
+    pub flags: u32,
+    pub handheld: i32,
+    pub console: i32,
+}
 extern "C" {
+    pub fn setsysInitialize() -> u32;
+    pub fn setsysExit();
+    pub fn setsysGetSleepSettings(out: *mut SleepSettings) -> u32;
+    pub fn setsysSetSleepSettings(settings: *const SleepSettings) -> u32;
+    pub fn sa_setting_read(key: u32, out: *mut u8, capacity: usize) -> u32;
     pub fn malloc(n: usize) -> *mut c_void;
     pub fn free(p: *mut c_void);
     pub fn sa_net_reinit() -> u32;
@@ -94,7 +106,7 @@ extern "C" {
     pub fn nsCountApplicationContentMeta(id: u64, count: *mut i32) -> u32;
     pub fn sa_ns(cmd: u32, p: *const u8, n: u32, buf: *mut u8, size: usize, count: *mut u32)
         -> u32;
-    pub fn sa_pm_launch(title_id: u64, pid: *mut u64) -> u32;
+    pub fn sa_request_launch(title_id: u64) -> u32;
     pub fn sa_launch(pid: *mut u64) -> u32;
     pub fn svcGetProcessId(pid: *mut u64, handle: u32) -> u32;
     pub fn svcGetProcessList(count: *mut i32, pids: *mut u64, capacity: u32) -> u32;

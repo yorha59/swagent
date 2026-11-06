@@ -88,7 +88,7 @@ static uint64_t launched_title;
 uint64_t host_launched_title(void){return launched_title;}
 uint32_t host_launch_calls(void){return launch_calls;}
 void host_launch_result(uint32_t rc){launch_result=rc;launch_calls=0;launched_title=0;}
-uint32_t sa_pm_launch(uint64_t title,uint64_t *pid){launched_title=title;launch_calls++;*pid=123;return launch_result;}
+uint32_t sa_request_launch(uint64_t title){launched_title=title;launch_calls++;return launch_result;}
 uint32_t sa_launch(uint64_t *pid){*pid=123;return launch_result;}
 static uint32_t process_failure, terminated, info_exits;
 void host_process_reset(uint32_t fail){process_failure=fail;terminated=info_exits=0;}
@@ -116,3 +116,22 @@ uint32_t sa_sd_space(int64_t *total,int64_t *free_space){
 static uint32_t reinit_failures;
 void host_reinit_failures(uint32_t n){reinit_failures=n;}
 uint32_t sa_net_reinit(void){if(reinit_failures){reinit_failures--;return 123;}return 0;}
+
+typedef struct { uint32_t flags; int32_t handheld, console; } SleepSettings;
+static SleepSettings host_sleep = {0xa5, 2, 3};
+static uint32_t settings_fail;
+void host_settings_fail(uint32_t fail) { settings_fail = fail; }
+uint32_t setsysInitialize(void) { return settings_fail == 1 ? 91 : 0; }
+void setsysExit(void) {}
+uint32_t setsysGetSleepSettings(SleepSettings *out) { *out = host_sleep; return settings_fail == 2 ? 92 : 0; }
+uint32_t setsysSetSleepSettings(const SleepSettings *in) {
+    if (settings_fail == 3) return 93;
+    if (in->flags != 0xa5) return 94;
+    host_sleep = *in;
+    if (settings_fail == 4) host_sleep.console = 5;
+    return 0;
+}
+uint32_t sa_setting_read(uint32_t key, char *out, size_t capacity) {
+    const char *values[] = {"23.0.0", "Switch\r\nname", "XAW000000", "87%", "42 C"};
+    snprintf(out, capacity, "%s", values[key]); return 0;
+}

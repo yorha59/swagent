@@ -28,7 +28,7 @@ symbols = subprocess.check_output([nm, root/'build/swagent.elf'], text=True)
 assert re.search(r' T agent_main$', symbols, re.M)
 assert not re.search(r' T (?:_exit|exit|abort)$', symbols, re.M)
 assert not re.search(r'\b(?:sa_(?:hid_init|buttons|touch|capture|jpeg\w*)|hiddbg\w*|capssc\w*|tj\w*)$', symbols, re.M)
-assert b'swagent-1.8-rs' in elf
+assert b'swagent-1.9-rs' in elf
 assert (root/'build/swagent.nsp').read_bytes() == p
 assert (artifact.parent/'flags/boot2.flag').exists()
 print(f'NSP: PFS0 + NSO + NPDM title ID + AArch64 ELF verified; {len(p):,} bytes')

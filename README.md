@@ -1,4 +1,4 @@
-# swagent — swagent-1.3-rs
+# swagent — swagent-1.9-rs
 
 Minimal resident Nintendo Switch agent. Title ID `430000000000000B`, TCP port
 `6000`, no UI, no polling tasks beyond accepting commands. Path B: Rust `no_std`
@@ -58,7 +58,7 @@ then recovers. Commands are case-sensitive.
 | Command | Response |
 | --- | --- |
 | `ping` | `pong` |
-| `version` | `swagent-1.8-rs` |
+| `version` | `swagent-1.9-rs` |
 | `install http://host[:port]/file.nsp [sd\|nand]` | `install: ok TITLEID`, or `install: error WHAT rc=N` |
 | `update http://host[:port]/exefs.nsp` | `update: ok` then disconnect, or `update: error WHAT rc=N` |
 | `launch TITLEID` | `launch: ok TITLEID`, or `launch: error rc=N` |
@@ -68,10 +68,22 @@ then recovers. Commands are case-sensitive.
 `launch` and `quit` require exactly 16 hexadecimal digits without a `0x`
 prefix; successful launch replies normalize the ID to lowercase. Invalid
 arguments return `COMMAND: error expected 16-hex-digit title ID rc=0`.
-Launch uses `pm:shell` with storage 0 (installed non-gamecard resolution) and
-32-bit flags 0. In libnx `pm.h`, 0x10 means StartSuspended on firmware 5.0.0+;
-it is not an application selector. The applet launch API requires an application
-or library-applet context and is unsuitable for this background sysmodule.
+Launch requests use `appletAE` → `GetDebugFunctions` (1000) →
+`RequestLaunchApplicationWithUserAndArgumentForDebug` (30), with no user IDs
+or launch argument. HOME Menu handles the request, including any required UI.
+`launch: ok` means the request was accepted, not that the title has started.
+This requires the following boot-time setting in
+`sd:/atmosphere/config/system_settings.ini` (merge into any existing section):
+
+```ini
+[am.debug]
+dev_function = u8!0x1
+```
+
+Reboot after changing it. Without the debug interface, launch returns a nonzero
+error; it never falls back to direct PM application launching. No applet proxy
+or launcher registration is used. FW 23 hardware validation is still required;
+see [LAUNCH_RESEARCH.md](LAUNCH_RESEARCH.md) for evidence and limits.
 The ring log records launch attempts and results. Quit scans the same process
 list as `ps`, skipping failed program-ID lookups (processes may have exited),
 and uses the same PM termination path and self-protection as `kill`.
@@ -177,3 +189,14 @@ src/tests.rs, tests/host.c                  host tests and libnx doubles
 tests/check_artifact.py                    independent artifact checks
 RESEARCH.md                               Phase 0 findings
 ```
+
+System settings (1.9): `sleep off` disables both handheld and docked auto-sleep;
+`sleep on` restores finite plans remembered during this process, or defaults to
+10 minutes handheld / 1 hour docked after restart. Replies are `sleep: ok on|off`
+(or `mixed` if readback differs). Other sleep flags are preserved. These are
+persistent console settings. `set sleep` reads state and raw timeout-plan enums.
+Read-only keys: `set firmware`, `set hostname` (console nickname, not DNS),
+`set serial`, `set battery` (percent), `set temperature` (SoC, whole Celsius;
+uses the modern ts session API, 10.0.0+). Responses are `set: KEY VALUE`.
+Service failures return command errors with the result code. No generic settings
+writer or ini writes are provided.

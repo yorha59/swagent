@@ -186,16 +186,52 @@ u32 sa_ns(unsigned cmd,const void *in,u32 in_size,void *buf,size_t size,u32 *cou
     if (s==&owned) serviceClose(&owned);
     return rc;
 }
-/* PM determines application type from program metadata. 0x10 is
- * StartSuspended on 5.0.0+, not an Application flag. Storage 0 resolves
- * installed non-gamecard programs (NcmStorageId_None in this libnx). */
-u32 sa_pm_launch(u64 title_id, u64 *pid) {
-    Result rc=pmshellInitialize(); if(rc) return rc;
-    NcmProgramLocation loc={.program_id=title_id,.storageID=NcmStorageId_None};
-    rc=pmshellLaunchProgram(PmLaunchFlag_None,&loc,pid); pmshellExit(); return rc;
+/* Foreground launch requests go through AM's debug interface, not PM.
+ * This root interface does not require an applet proxy. AM caches the
+ * am.debug!dev_function setting at boot; see LAUNCH_RESEARCH.md. */
+u32 sa_request_launch(u64 title_id) {
+    if (hosversionBefore(6,0,0))
+        return MAKERESULT(Module_Libnx,LibnxError_IncompatSysVer);
+    Service root={0},debug={0};
+    Result rc=smGetService(&root,"appletAE");
+    if (rc) return rc;
+    rc=serviceConvertToDomain(&root);
+    if (!rc) rc=serviceDispatch(&root,1000);
+    /* Check the actual object count before reading an object ID. AM may
+     * succeed without returning an interface when debug functions are off. */
+    if (!rc) {
+        HipcResponse response=hipcParseResponse(armGetTls());
+        const CmifDomainOutHeader *domain=cmifGetAlignedDataStart(response.data_words,armGetTls());
+        if (domain->num_out_objects!=1) {
+            rc=MAKERESULT(Module_Libnx,LibnxError_NotInitialized);
+        } else {
+            CmifResponse parsed={0};
+            rc=cmifParseResponse(&parsed,armGetTls(),true,0);
+            if (!rc) {
+                u32 object_id=cmifResponseGetObject(&parsed);
+                if (object_id) serviceCreateDomainSubservice(&debug,&root,object_id);
+                else rc=MAKERESULT(Module_Libnx,LibnxError_NotInitialized);
+            }
+        }
+    }
+    if (!rc) {
+        const struct { u8 flag; u64 application_id; } in={0,title_id};
+        _Static_assert(sizeof(in)==16,"AM launch request ABI");
+        rc=serviceDispatchIn(&debug,30,in,
+            .buffer_attrs={SfBufferAttr_In|SfBufferAttr_HipcMapAlias,
+                           SfBufferAttr_In|SfBufferAttr_HipcMapAlias},
+            .buffers={{NULL,0},{NULL,0}});
+    }
+    if (serviceGetObjectId(&debug)) serviceClose(&debug);
+    serviceClose(&root);
+    return rc;
 }
+/* Resident self-update still launches a background program through PM. */
 u32 sa_launch(u64 *pid) {
-    return sa_pm_launch(0x430000000000000B,pid);
+    Result rc=pmshellInitialize(); if(rc) return rc;
+    NcmProgramLocation loc={.program_id=0x430000000000000B,.storageID=NcmStorageId_None};
+    rc=pmshellLaunchProgram(PmLaunchFlag_None,&loc,pid);
+    pmshellExit(); return rc;
 }
 /* Process termination belongs to pm:shell, not pm:dmnt, in libnx. */
 u32 sa_terminate(u64 pid) {
@@ -208,3 +244,56 @@ extern void agent_park(void);
 void __wrap_exit(int status) { (void)status; agent_park(); __builtin_unreachable(); }
 void __wrap__exit(int status) { (void)status; agent_park(); __builtin_unreachable(); }
 void __wrap_abort(void) { agent_park(); __builtin_unreachable(); }
+
+/* Fixed read-only adapters; no arbitrary settings item IDs or writers. */
+u32 sa_setting_read(u32 key, char *out, size_t capacity) {
+    Result rc;
+    if (key <= 2) {
+        if (key == 1) {
+            rc = setInitialize();
+            if (R_FAILED(rc)) return rc;
+            SetSysDeviceNickName name = {0};
+            rc = setGetDeviceNickname(&name);
+            if (R_SUCCEEDED(rc)) snprintf(out, capacity, "%.*s", (int)sizeof(name.nickname), name.nickname);
+            setExit();
+            return rc;
+        }
+        rc = setsysInitialize();
+        if (R_FAILED(rc)) return rc;
+        if (key == 0) {
+            SetSysFirmwareVersion fw = {0};
+            rc = setsysGetFirmwareVersion(&fw);
+            if (R_SUCCEEDED(rc)) snprintf(out, capacity, "%u.%u.%u", fw.major, fw.minor, fw.micro);
+        } else {
+            SetSysSerialNumber serial = {0};
+            rc = setsysGetSerialNumber(&serial);
+            if (R_SUCCEEDED(rc)) snprintf(out, capacity, "%.*s", (int)sizeof(serial.number), serial.number);
+        }
+        setsysExit();
+        return rc;
+    }
+    if (key == 3) {
+        rc = psmInitialize();
+        if (R_FAILED(rc)) return rc;
+        u32 percent = 0;
+        rc = psmGetBatteryChargePercentage(&percent);
+        if (R_SUCCEEDED(rc)) snprintf(out, capacity, "%u%%", percent);
+        psmExit();
+        return rc;
+    }
+    if (key == 4) {
+        rc = tsInitialize();
+        if (R_FAILED(rc)) return rc;
+        TsSession session = {0};
+        rc = tsOpenSession(&session, TsDeviceCode_LocationExternal);
+        if (R_SUCCEEDED(rc)) {
+            float temperature = 0;
+            rc = tsSessionGetTemperature(&session, &temperature);
+            if (R_SUCCEEDED(rc)) snprintf(out, capacity, "%d C", (int)temperature);
+            tsSessionClose(&session);
+        }
+        tsExit();
+        return rc;
+    }
+    return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+}
