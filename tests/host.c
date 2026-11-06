@@ -152,3 +152,6 @@ unsigned sa_mkdir(const char *p) { (void)p; return 1; }
 unsigned sa_dir_open(const char *p, void *d) { (void)p; (void)d; return 1; }
 unsigned sa_dir_read(void *d, char *n, void *s, void *t, void *c) { (void)d; (void)n; (void)s; (void)t; (void)c; return 1; }
 void fsDirClose(void *d) { (void)d; }
+uint32_t sa_wifi(uint32_t join, const uint8_t *profile, uint8_t *records, int32_t *count) {
+    (void)join; (void)profile; (void)records; *count=0; return 123;
+}

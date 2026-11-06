@@ -242,6 +242,7 @@ fn execute(job: Job) {
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
+            "wifi" => crate::wifi::command(id, job.line.str().trim_start().strip_prefix("wifi").unwrap_or("").trim())?,
             "power" => {
                 // Always queued; telemetry and failures do not enter the ring log.
                 let mut s = Text::<256>::new();
@@ -625,7 +626,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.13-rs");
+            let _ = reply(id, b"swagent-1.14-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {

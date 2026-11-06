@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.13-rs\r\n"),
+        ("version", "swagent-1.14-rs\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1490,4 +1490,58 @@ fn full_install_hash_binary_http_transport() {
         }
         assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
     }
+}
+
+#[test]
+fn wifi_switchbrew_wire_fixture() {
+    let p = crate::wifi::profile(b"test", b"password").unwrap();
+    let mut expected = [0u8; 0x17c];
+    expected[0] = 1;
+    expected[13] = 1;
+    expected[192..194].copy_from_slice(&[0xdc, 0x05]);
+    expected[210..214].copy_from_slice(b"test");
+    expected[274..278].copy_from_slice(&[1, 1, 1, 0]);
+    expected[278..283].copy_from_slice(b"\x04test");
+    expected[311..314].copy_from_slice(&[0, 6, 4]);
+    expected[314..323].copy_from_slice(b"\x08password");
+    assert_eq!(p, expected); // Includes UUID, proxy, address, tail padding zeros.
+}
+#[test]
+fn wifi_length_prefix_boundaries() {
+    let p = crate::wifi::profile(&[b's'; 32], &[b'k'; 63]).unwrap();
+    assert_eq!(p[0x116], 32);
+    assert_eq!(&p[0x117..0x137], &[b's'; 32]);
+    assert_eq!(p[0x137], 0); // NonBroadcast, not an SSID terminator.
+    assert_eq!(p[0x13a], 63);
+    assert_eq!(&p[0x13b..0x17a], &[b'k'; 63]);
+    assert_eq!(&p[0x17a..], &[0, 0]);
+    for (ssid, key) in [(b"".as_slice(), b"password".as_slice()),
+        (&[b's'; 33], b"password"), (b"ssid", b"short"), (b"ssid", &[b'k'; 64])] {
+        assert!(crate::wifi::profile(ssid, key).is_err());
+    }
+}
+
+#[test]
+fn wifi_ipc_error_keeps_worker_responsive() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::AsRawFd, net::UnixStream}};
+    let _guard = SERIAL.lock().unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut client = BufReader::new(client);
+    for (command, expected) in [
+        ("wifi", "wifi: error rc=123\r\n"),
+        (" wifi join \"my ssid\" \"my password\"", "wifi: join error rc=123\r\n"),
+    ] {
+        protocol::test_receive(command);
+        protocol::test_run_one();
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, expected);
+        protocol::test_receive("ping");
+        line.clear();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, "pong\r\n");
+    }
+    protocol::test_session(-1);
 }
