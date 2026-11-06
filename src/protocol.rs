@@ -192,12 +192,109 @@ fn quit_title(title: u64) -> Result<Option<u64>> {
     }
     Ok(None)
 }
+struct Settings;
+impl Drop for Settings {
+    fn drop(&mut self) {
+        unsafe { ffi::setsysExit() }
+    }
+}
+static SLEEP_PLANS: Lock<(i32, i32)> = Lock::new((3, 0));
+pub(crate) fn format_sleep(settings: &ffi::SleepSettings) -> &'static str {
+    match (settings.handheld == 5, settings.console == 5) {
+        (true, true) => "off",
+        (false, false) => "on",
+        _ => "mixed",
+    }
+}
+fn sleep_settings(state: Option<bool>) -> Result<ffi::SleepSettings> {
+    rc(unsafe { ffi::setsysInitialize() }, "initialize set:sys")?;
+    let _guard = Settings;
+    let mut settings = ffi::SleepSettings::default();
+    rc(
+        unsafe { ffi::setsysGetSleepSettings(&mut settings) },
+        "read sleep settings",
+    )?;
+    if let Some(on) = state {
+        SLEEP_PLANS.with(|plans| {
+            if (0..5).contains(&settings.handheld) {
+                plans.0 = settings.handheld;
+            }
+            if (0..5).contains(&settings.console) {
+                plans.1 = settings.console;
+            }
+            settings.handheld = if on { plans.0 } else { 5 };
+            settings.console = if on { plans.1 } else { 5 };
+        });
+        rc(
+            unsafe { ffi::setsysSetSleepSettings(&settings) },
+            "write sleep settings",
+        )?;
+        rc(
+            unsafe { ffi::setsysGetSleepSettings(&mut settings) },
+            "read back sleep settings",
+        )?;
+    }
+    Ok(settings)
+}
 fn execute(job: Job) {
     let id = job.id;
     let mut words = job.line.str().split_ascii_whitespace();
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
+            "sleep" => {
+                let on = match (words.next(), words.next()) {
+                    (Some("on"), None) => true,
+                    (Some("off"), None) => false,
+                    _ => return Err(Error("usage: sleep <on|off>", 0)),
+                };
+                let settings = sleep_settings(Some(on))?;
+                let mut s = Text::<64>::new();
+                let _ = write!(s, "sleep: ok {}", format_sleep(&settings));
+                reply(id, s.bytes())?;
+            }
+            "set" => {
+                let key = words.next().ok_or(Error("usage: set KEY", 0))?;
+                if words.next().is_some() {
+                    return Err(Error("usage: set KEY", 0));
+                }
+                let mut s = Text::<256>::new();
+                if key == "sleep" {
+                    let settings = sleep_settings(None)?;
+                    let _ = write!(
+                        s,
+                        "set: sleep {} handheld={} console={}",
+                        format_sleep(&settings),
+                        settings.handheld,
+                        settings.console
+                    );
+                } else {
+                    let code = match key {
+                        "firmware" => 0,
+                        "hostname" => 1,
+                        "serial" => 2,
+                        "battery" => 3,
+                        "temperature" => 4,
+                        _ => return Err(Error("unknown setting key", 0)),
+                    };
+                    let mut value = [0u8; 128];
+                    rc(
+                        unsafe { ffi::sa_setting_read(code, value.as_mut_ptr(), value.len()) },
+                        "read setting",
+                    )?;
+                    let end = value.iter().position(|&b| b == 0).unwrap_or(value.len());
+                    // Keep device-provided strings within one protocol line.
+                    for b in &mut value[..end] {
+                        if b.is_ascii_control() {
+                            *b = b' ';
+                        }
+                    }
+                    let value = core::str::from_utf8(&value[..end])
+                        .map_err(|_| Error("invalid setting text", 0))?;
+                    let _ = write!(s, "set: {} {}", key, value);
+                }
+                reply(id, s.bytes())?;
+            }
             "launch" | "quit" => {
                 let title = title_arg(&mut words)?;
                 let mut s = Text::<96>::new();
@@ -205,8 +302,7 @@ fn execute(job: Job) {
                     let _ = write!(s, "launch: attempt {:016x}", title);
                     log::add(s.str());
                     s = Text::new();
-                    let mut pid = 0;
-                    let result = unsafe { ffi::sa_pm_launch(title, &mut pid) };
+                    let result = unsafe { ffi::sa_request_launch(title) };
                     if result == 0 {
                         let _ = write!(s, "launch: ok {:016x}", title);
                     } else {
@@ -492,7 +588,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.8-rs");
+            let _ = reply(id, b"swagent-1.9-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {

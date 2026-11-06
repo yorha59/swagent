@@ -261,14 +261,16 @@ fn launch_and_quit_commands() {
             );
         }
     }
-    unsafe {
-        host_launch_result(1234);
+    // Failed AM requests must return the original result without retrying PM.
+    for result in [1234, 0xAD800A08, 0xAF400A08, 0xD601] {
+        unsafe { host_launch_result(result) };
+        protocol::test_receive("launch 0100123400000000");
+        protocol::test_run_one();
+        let mut actual = String::new();
+        client.read_line(&mut actual).unwrap();
+        assert_eq!(actual, format!("launch: error rc={result}\r\n"));
+        assert_eq!(unsafe { host_launch_calls() }, 1);
     }
-    protocol::test_receive("launch 0100123400000000");
-    protocol::test_run_one();
-    let mut actual = String::new();
-    client.read_line(&mut actual).unwrap();
-    assert_eq!(actual, "launch: error rc=1234\r\n");
     let mut attempt = false;
     log::dump(1000, |s| {
         attempt |= s == b"launch: attempt 0100123400000000"
@@ -593,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.8-rs\r\n"),
+        ("version", "swagent-1.9-rs\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1019,4 +1021,77 @@ fn invalid_download_is_removed_before_resume() {
     let mut chunk = [0; 32];
     assert!(install::install_downloaded(5, &mut chunk).is_err());
     assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
+}
+
+#[test]
+fn system_settings_commands_and_readback() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::{io::AsRawFd, net::UnixStream},
+    };
+    unsafe extern "C" {
+        fn host_settings_fail(fail: u32);
+    }
+    let _guard = SERIAL.lock().unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut client = BufReader::new(client);
+    for (fail, command, expected) in [
+        (0, "sleep off", "sleep: ok off"),
+        (0, "set sleep", "set: sleep off handheld=5 console=5"),
+        (0, "sleep off", "sleep: ok off"),
+        (0, "sleep on", "sleep: ok on"),
+        (0, "set sleep", "set: sleep on handheld=2 console=3"),
+        (0, "sleep", "sleep: error usage: sleep <on|off> rc=0"),
+        (0, "sleep ON", "sleep: error usage: sleep <on|off> rc=0"),
+        (
+            0,
+            "sleep off extra",
+            "sleep: error usage: sleep <on|off> rc=0",
+        ),
+        (0, "set", "set: error usage: set KEY rc=0"),
+        (0, "set battery 10", "set: error usage: set KEY rc=0"),
+        (0, "set arbitrary", "set: error unknown setting key rc=0"),
+        (0, "set firmware", "set: firmware 23.0.0"),
+        (0, "set hostname", "set: hostname Switch  name"),
+        (0, "set serial", "set: serial XAW000000"),
+        (0, "set battery", "set: battery 87%"),
+        (0, "set temperature", "set: temperature 42 C"),
+        (1, "sleep off", "sleep: error initialize set:sys rc=91"),
+        (2, "sleep off", "sleep: error read sleep settings rc=92"),
+        (3, "sleep off", "sleep: error write sleep settings rc=93"),
+        (4, "sleep on", "sleep: ok mixed"),
+        (0, "sleep on", "sleep: ok on"),
+    ] {
+        unsafe {
+            host_settings_fail(fail);
+        }
+        protocol::test_receive(command);
+        protocol::test_run_one();
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, format!("{expected}\r\n"), "{command}");
+    }
+    unsafe {
+        host_settings_fail(0);
+    }
+    protocol::test_session(-1);
+    for (handheld, console, expected) in [
+        (5, 5, "off"),
+        (0, 4, "on"),
+        (5, 0, "mixed"),
+        (3, 5, "mixed"),
+    ] {
+        assert_eq!(
+            protocol::format_sleep(&ffi::SleepSettings {
+                flags: 99,
+                handheld,
+                console
+            }),
+            expected
+        );
+    }
 }
