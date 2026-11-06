@@ -13,7 +13,7 @@ pub fn path(input: &str, write: bool) -> Result<Text<768>> {
         || p.contains(':')
         || p.contains('\\')
         || p.bytes().any(|b| b.is_ascii_control())
-        || (write && !(p.starts_with("atmosphere/config/") || p.starts_with("switch/")))
+        || (write && !(p.starts_with("atmosphere/config/") || p.starts_with("switch/") || p.starts_with("bootloader/")))
     {
         return Err(Error("path not allowed", 0));
     }
