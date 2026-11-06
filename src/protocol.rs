@@ -417,19 +417,42 @@ fn execute(job: Job) {
                     reply(id, s.bytes())?;
                 }
             }
+            "hash" => {
+                let input = words.next().ok_or(Error("usage: hash SD-PATH", 0))?;
+                if words.next().is_some() {
+                    return Err(Error("usage: hash SD-PATH", 0));
+                }
+                let path = crate::files::path(input, false)?;
+                let mut chunk = Buffer::new(4 * 1024 * 1024)?;
+                let digest = crate::md5::file(path.str(), &mut chunk, 8 * 1024 * 1024 * 1024)?;
+                let mut line = Text::<64>::new();
+                let _ = write!(line, "hash: md5 {}", digest.str());
+                reply(id, line.bytes())?;
+            }
             "install" => {
                 let url = words
                     .next()
-                    .ok_or(Error("usage: install URL [sd|nand]", 0))?;
+                    .ok_or(Error("usage: install URL [sd|nand] [md5=HEX]", 0))?;
                 let storage = match words.next().unwrap_or("sd") {
                     "sd" => 5,
                     "nand" => 4,
                     _ => return Err(Error("destination must be sd or nand", 0)),
                 };
+                let expected = words.next().map(crate::md5::expected).transpose()?;
                 if words.next().is_some() {
                     return Err(Error("too many arguments", 0));
                 }
-                let title = install::install(url, storage)?;
+                let title = match install::install_checked(
+                    url,
+                    storage,
+                    expected.as_ref().map(|v| v.str()),
+                    &mut |line| {
+                        let _ = reply(id, line.as_bytes());
+                    },
+                ) {
+                    Err(Error("hash mismatch", _)) => return Ok(()),
+                    other => other?,
+                };
                 let mut s = Text::<64>::new();
                 let _ = write!(s, "install: ok {:016x}", title);
                 log::add(s.str());
@@ -602,7 +625,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.12-rs");
+            let _ = reply(id, b"swagent-1.13-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {

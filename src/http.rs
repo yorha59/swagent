@@ -32,43 +32,46 @@ pub fn parse(url: &str) -> Result<Url> {
     Ok(u)
 }
 pub fn download(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u64> {
-    download_inner(url, path, chunk, limit, false, 0)
+    download_inner(url, path, chunk, limit, false, 0, &mut None)
 }
 pub fn download_install(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> Result<u64> {
-    static LAST_URL: Lock<Text<1600>> = Lock::new(Text::new());
-    LAST_URL.with(|last| -> Result {
+    static LAST_URL: Lock<(Text<1600>, Option<u64>)> = Lock::new((Text::new(), None));
+    LAST_URL.with(|state| -> Result<u64> {
+        let (last, expected) = state;
         let same = last.str() == url;
         let mut next = Text::new();
         next.push(url.as_bytes())?;
         if !same {
             File::open(path, true)?;
         }
+        if !same {
+            *expected = None;
+        }
         *last = next;
-        Ok(())
-    })?;
-    for failure in 1..=30 {
-        let offset = match File::open(path, false) {
-            Ok(mut f) => f.size()?,
-            Err(_) => 0,
-        };
-        match download_inner(url, path, chunk, limit, true, offset) {
-            Ok(n) => return Ok(n),
-            Err(e) => {
-                if !retryable(e) || failure == 30 || crate::retiring() {
-                    return Err(e);
+        for failure in 1..=30 {
+            let offset = match File::open(path, false) {
+                Ok(mut f) => f.size()?,
+                Err(_) => 0,
+            };
+            match download_inner(url, path, chunk, limit, true, offset, expected) {
+                Ok(n) => return Ok(n),
+                Err(e) => {
+                    if !retryable(e) || failure == 30 || crate::retiring() {
+                        return Err(e);
+                    }
+                    let offset = match File::open(path, false) {
+                        Ok(mut f) => f.size()?,
+                        Err(_) => 0,
+                    };
+                    let mut line = Text::<128>::new();
+                    let _ = write!(line, "install: retry {} from offset {}", failure, offset);
+                    crate::log::add(line.str());
+                    sleep(5000);
                 }
-                let offset = match File::open(path, false) {
-                    Ok(mut f) => f.size()?,
-                    Err(_) => 0,
-                };
-                let mut line = Text::<128>::new();
-                let _ = write!(line, "install: retry {} from offset {}", failure, offset);
-                crate::log::add(line.str());
-                sleep(5000);
             }
         }
-    }
-    unreachable!()
+        unreachable!()
+    })
 }
 fn retryable(e: Error) -> bool {
     matches!(
@@ -93,6 +96,7 @@ fn download_inner(
     limit: u64,
     track: bool,
     offset: u64,
+    original_total: &mut Option<u64>,
 ) -> Result<u64> {
     use core::sync::atomic::Ordering::Relaxed;
     let u = parse(url)?;
@@ -137,7 +141,7 @@ fn download_inner(
         .nth(1)
         .and_then(|v| v.parse::<u32>().ok())
         .ok_or(Error("invalid HTTP status", 0))?;
-    if !matches!(code, 200 | 206 | 416) {
+    if !matches!(code, 200 | 206) {
         return Err(Error("HTTP status", code));
     }
     let mut range = None;
@@ -175,7 +179,7 @@ fn download_inner(
     }
     let start = if code == 206 { offset } else { 0 };
     let mut expected_total = length;
-    if code == 206 || code == 416 {
+    if code == 206 {
         let r = range
             .and_then(|v| v.strip_prefix("bytes "))
             .ok_or(Error("missing Content-Range", 0))?;
@@ -186,14 +190,8 @@ fn download_inner(
         if total == 0 || total > limit {
             return Err(Error("download size limit", 0));
         }
-        if code == 416 {
-            if span == "*" && offset == total {
-                if track {
-                    crate::install::INSTALL_TOTAL_BYTES.store(total, Relaxed);
-                }
-                return Ok(total);
-            }
-            return Err(Error("HTTP range not satisfiable", 416));
+        if original_total.is_none_or(|expected| expected != total) {
+            return Err(Error("Content-Range total mismatch", 0));
         }
         let (first, last) = span
             .split_once('-')
@@ -217,6 +215,9 @@ fn download_inner(
     if length.is_some_and(|n| n == 0 || n > limit - start) {
         return Err(Error("download size limit", 0));
     }
+    // A full 200 response starts a new representation and must truncate, even
+    // when this request sent Range. Never append a 200 body to the saved prefix.
+    *original_total = expected_total;
     if track {
         crate::install::INSTALL_TOTAL_BYTES.store(expected_total.unwrap_or(0), Relaxed);
         crate::install::INSTALL_RX_BYTES.store(start, Relaxed);

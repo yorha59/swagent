@@ -18,16 +18,17 @@ static void path(const char *p,char *out) {
 }
 uint32_t svcSleepThread(int64_t n){if(n!=5000000000LL)usleep(n/1000);return 0;}
 static _Thread_local const char *receive_fixture;
-static _Thread_local size_t receive_offset;
+static _Thread_local size_t receive_offset, receive_length;
 static _Thread_local char fixture_request[2048];
 const char *host_fixture_request(void){return fixture_request;}
 static _Thread_local int receive_error, connect_failure, fixture_connects;
 int host_fixture_connects(void){return fixture_connects;}
 void host_connect_failure(int error){connect_failure=error;}
-void host_receive_fixture(const char *p,int error){receive_fixture=p;receive_offset=0;fixture_connects=0;receive_error=error;}
+void host_receive_bytes(const void *p,size_t n,int error){receive_fixture=p;receive_length=n;receive_offset=0;fixture_connects=0;receive_error=error;}
+void host_receive_fixture(const char *p,int error){host_receive_bytes(p,p?strlen(p):0,error);}
 ssize_t sa_recv(int fd,void *p,size_t n,int flags){
     if(!receive_fixture)return recv(fd,p,n,flags);
-    size_t left=strlen(receive_fixture)-receive_offset;
+    size_t left=receive_length-receive_offset;
     if(!left){errno=receive_error;return -1;}
     if(n>left)n=left;
     memcpy(p,receive_fixture+receive_offset,n);receive_offset+=n;return n;
