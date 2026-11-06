@@ -146,3 +146,8 @@ uint32_t sa_power_gauge(uint8_t *voltage, uint8_t *current) {
     current[0]=0x00; current[1]=0xe7; /* -1000mA */
     return power_fail==1?91:0;
 }
+
+unsigned sa_mkdir(const char *p) { (void)p; return 1; }
+unsigned sa_dir_open(const char *p, void *d) { (void)p; (void)d; return 1; }
+unsigned sa_dir_read(void *d, char *n, void *s, void *t, void *c) { (void)d; (void)n; (void)s; (void)t; (void)c; return 1; }
+void fsDirClose(void *d) { (void)d; }
