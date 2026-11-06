@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.9-rs\r\n"),
+        ("version", "swagent-1.10-rs\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -786,6 +786,7 @@ fn install_eagain_retries_and_preserves_download() {
             host_receive_fixture(core::ptr::null(), 0);
         }
         assert_eq!(result, Err(Error("network receive", 11)));
+        assert!(!std::path::Path::new("build/host-sd/switch/.swagent_sleep_guard.bin").exists());
         assert!(!crate::net::pending());
         protocol::test_session(-1);
         protocol::test_install_error(result.unwrap_err());
@@ -1093,5 +1094,77 @@ fn system_settings_commands_and_readback() {
             }),
             expected
         );
+    }
+}
+
+#[test]
+fn sleep_guard_save_restore_and_crash_recovery() {
+    unsafe extern "C" {
+        fn host_settings_fail(fail: u32);
+    }
+    let _serial = SERIAL.lock().unwrap();
+    setup();
+    unsafe {
+        host_settings_fail(0);
+    }
+    let path = "build/host-sd/switch/.swagent_sleep_guard.bin";
+    sleep_guard::cancel();
+    let original = ffi::SleepSettings {
+        flags: 0xa5,
+        handheld: 2,
+        console: 3,
+    };
+    let read = || {
+        let mut s = ffi::SleepSettings::default();
+        assert_eq!(unsafe { ffi::setsysGetSleepSettings(&mut s) }, 0);
+        (s.flags, s.handheld, s.console)
+    };
+    assert_eq!(unsafe { ffi::setsysSetSleepSettings(&original) }, 0);
+    sleep_guard::begin().unwrap();
+    assert_eq!(read(), (0xa5, 5, 5));
+    let record = std::fs::read(path).unwrap();
+    assert_eq!(&record[..8], b"SWASLP01");
+    sleep_guard::restore();
+    assert_eq!(read(), (0xa5, 2, 3));
+    assert!(!std::path::Path::new(path).exists());
+    sleep_guard::begin().unwrap();
+    sleep_guard::recover(); // Simulates a fresh module: all state comes from SD.
+    assert_eq!(read(), (0xa5, 2, 3));
+    assert!(!std::path::Path::new(path).exists());
+    sleep_guard::begin().unwrap();
+    assert_eq!(unsafe { ffi::setsysSetSleepSettings(&original) }, 0);
+    sleep_guard::recover(); // User changed settings after the crash.
+    assert_eq!(read(), (0xa5, 2, 3));
+    assert!(!std::path::Path::new(path).exists());
+    sleep_guard::begin().unwrap();
+    sleep_guard::cancel(); // Successful manual sleep off cancels restoration.
+    sleep_guard::restore();
+    assert_eq!(read(), (0xa5, 5, 5));
+    assert_eq!(unsafe { ffi::setsysSetSleepSettings(&original) }, 0);
+    for bad in [b"bad".as_slice(), &[0; 20]] {
+        std::fs::write(path, bad).unwrap();
+        sleep_guard::recover();
+        assert_eq!(read(), (0xa5, 2, 3));
+        assert!(!std::path::Path::new(path).exists());
+    }
+    sleep_guard::begin().unwrap();
+    unsafe {
+        host_settings_fail(3);
+    }
+    sleep_guard::restore();
+    assert!(std::path::Path::new(path).exists());
+    unsafe {
+        host_settings_fail(0);
+    }
+    sleep_guard::recover();
+    assert_eq!(read(), (0xa5, 2, 3));
+    assert!(!std::path::Path::new(path).exists());
+    unsafe {
+        host_settings_fail(2);
+    }
+    assert!(sleep_guard::begin().is_err());
+    assert!(!std::path::Path::new(path).exists());
+    unsafe {
+        host_settings_fail(0);
     }
 }

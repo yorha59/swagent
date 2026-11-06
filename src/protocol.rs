@@ -192,7 +192,7 @@ fn quit_title(title: u64) -> Result<Option<u64>> {
     }
     Ok(None)
 }
-struct Settings;
+pub(crate) struct Settings;
 impl Drop for Settings {
     fn drop(&mut self) {
         unsafe { ffi::setsysExit() }
@@ -249,6 +249,7 @@ fn execute(job: Job) {
                     _ => return Err(Error("usage: sleep <on|off>", 0)),
                 };
                 let settings = sleep_settings(Some(on))?;
+                crate::sleep_guard::cancel();
                 let mut s = Text::<64>::new();
                 let _ = write!(s, "sleep: ok {}", format_sleep(&settings));
                 reply(id, s.bytes())?;
@@ -588,7 +589,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.9-rs");
+            let _ = reply(id, b"swagent-1.10-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {
