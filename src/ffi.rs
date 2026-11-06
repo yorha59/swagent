@@ -32,6 +32,10 @@ pub struct SleepSettings {
     pub console: i32,
 }
 extern "C" {
+    pub fn sa_mkdir(p: *const c_char) -> u32;
+    pub fn sa_dir_open(p: *const c_char, out: *mut Service) -> u32;
+    pub fn sa_dir_read(d: *mut Service, name: *mut u8, size: *mut u64, kind: *mut i32, count: *mut i64) -> u32;
+    pub fn fsDirClose(d: *mut Service);
     pub fn sa_power_psm(percent: *mut u32, charger: *mut u32) -> u32;
     pub fn sa_power_gauge(voltage: *mut u8, current: *mut u8) -> u32;
     pub fn setsysInitialize() -> u32;

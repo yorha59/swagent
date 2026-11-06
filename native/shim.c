@@ -332,3 +332,23 @@ u32 sa_power_gauge(u8 *voltage, u8 *current) {
     i2cExit();
     return rc;
 }
+
+u32 sa_mkdir(const char *path) {
+    FsFileSystem *fs; char p[FS_MAX_PATH];
+    if (fsdevTranslatePath(path,&fs,p)) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    return fsFsCreateDirectory(fs,p);
+}
+u32 sa_dir_open(const char *path, FsDir *out) {
+    FsFileSystem *fs; char p[FS_MAX_PATH];
+    if (fsdevTranslatePath(path,&fs,p)) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    return fsFsOpenDirectory(fs,p,FsDirOpenMode_ReadDirs|FsDirOpenMode_ReadFiles,out);
+}
+u32 sa_dir_read(FsDir *dir, char *name, u64 *size, int *type, s64 *count) {
+    FsDirectoryEntry entry;
+    Result rc=fsDirRead(dir,count,1,&entry);
+    if (!rc && *count) {
+        memcpy(name,entry.name,FS_MAX_PATH);
+        *size=entry.file_size; *type=entry.type;
+    }
+    return rc;
+}

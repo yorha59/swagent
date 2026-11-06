@@ -602,7 +602,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.11-rs");
+            let _ = reply(id, b"swagent-1.12-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {
@@ -614,6 +614,35 @@ fn receive(id: u64, line: Text<512>) {
             }
         }
         _ => enqueue(id, line),
+    }
+}
+fn file_reply(id: u64, cmd: &str, path: &str, body: &[u8]) {
+    let _ = SESSION.with(|s| {
+        if s.id != id || s.fd < 0 { return Err(Error("disconnected", 0)); }
+        let sock = core::mem::ManuallyDrop::new(Socket::new(s.fd));
+        crate::files::run(&crate::files::Sd, cmd, path, body, &mut |b| sock.send(b))
+    });
+}
+struct Upload { path: Text<512>, bytes: Buffer, used: usize }
+fn file_line(id: u64, line: &str) -> Result<Option<Upload>> {
+    let mut words = line.split_ascii_whitespace();
+    let cmd = words.next().unwrap_or("");
+    let Some(path) = words.next() else { return Err(Error("usage", 0)); };
+    if cmd == "put" {
+        // Invalid uploads close the connection: their unconsumed body must never
+        // be interpreted as commands.
+        let n = words.next().and_then(|s| s.parse::<usize>().ok()).ok_or(Error("usage", 0))?;
+        if words.next().is_some() { return Err(Error("usage", 0)); }
+        crate::files::path(path, true)?;
+        if n > crate::files::MAX { return Err(Error("too large", 0)); }
+        let mut p = Text::new(); p.push(path.as_bytes())?;
+        let upload = Upload { path: p, bytes: Buffer::new(n)?, used: 0 };
+        if n == 0 { file_reply(id, "put", path, &[]); return Ok(None); }
+        Ok(Some(upload))
+    } else {
+        if words.next().is_some() { return Err(Error("usage", 0)); }
+        file_reply(id, cmd, path, &[]);
+        Ok(None)
     }
 }
 pub fn serve() -> ! {
@@ -657,6 +686,7 @@ pub fn serve() -> ! {
             });
             log::add("client connected");
             let mut frame = Frame::new();
+            let mut upload: Option<Upload> = None;
             'client: loop {
                 let mut input = [0; 512];
                 let n = unsafe { ffi::sa_recv(fd, input.as_mut_ptr(), input.len(), 0) };
@@ -669,6 +699,10 @@ pub fn serve() -> ! {
                 if n < 0 {
                     let e = unsafe { ffi::sa_errno() };
                     if crate::net::transient(e) {
+                        if upload.is_some() {
+                            let _ = reply(id, b"put: error rc=0");
+                            break;
+                        }
                         continue;
                     }
                     crate::net::failed(e);
@@ -678,9 +712,31 @@ pub fn serve() -> ! {
                     break;
                 };
                 for byte in input {
+                    if let Some(u) = upload.as_mut() {
+                        u.bytes[u.used] = *byte;
+                        u.used += 1;
+                        if u.used == u.bytes.len() {
+                            file_reply(id, "put", u.path.str(), &u.bytes);
+                            upload = None;
+                        }
+                        continue;
+                    }
                     if let Some(result) = frame.feed(*byte) {
                         match result {
-                            Ok(line) if line.len > 0 => receive(id, line),
+                            Ok(line) if line.len > 0 => {
+                                let cmd = line.str().split_ascii_whitespace().next().unwrap_or("");
+                                if matches!(cmd, "put" | "cat" | "ls" | "mkdir") {
+                                    match file_line(id, line.str()) {
+                                        Ok(u) => upload = u,
+                                        Err(e) => {
+                                            let mut msg = Text::<128>::new();
+                                            let _ = write!(msg, "{}: error {}", cmd, e.0);
+                                            let _ = reply(id, msg.bytes());
+                                            if cmd == "put" { break 'client; }
+                                        }
+                                    }
+                                } else { receive(id, line); }
+                            },
                             Err(_) => {
                                 let _ = reply(id, b"error: invalid or oversized line");
                             }
