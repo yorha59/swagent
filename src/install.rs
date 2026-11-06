@@ -417,11 +417,21 @@ fn records(key: Key, storage: u32) -> Result {
     }
     rc(pushed, "ns PushApplicationRecord")
 }
+#[cfg(test)]
 pub fn install(url: &str, storage: u32) -> Result<u64> {
+    install_checked(url, storage, None, &mut |_| {})
+}
+pub fn install_checked(
+    url: &str,
+    storage: u32,
+    expected: Option<&str>,
+    emit: &mut dyn FnMut(&str),
+) -> Result<u64> {
     INSTALL_RX_BYTES.store(0, Relaxed);
     INSTALL_TOTAL_BYTES.store(0, Relaxed);
     INSTALL_PHASE.store(Phase::Downloading as u8, Release);
-    let result = crate::sleep_guard::begin().and_then(|_| install_inner(url, storage));
+    let result =
+        crate::sleep_guard::begin().and_then(|_| install_inner(url, storage, expected, emit));
     crate::sleep_guard::restore();
     INSTALL_PHASE.store(
         if result.is_ok() {
@@ -433,13 +443,37 @@ pub fn install(url: &str, storage: u32) -> Result<u64> {
     );
     result
 }
-fn install_inner(url: &str, storage: u32) -> Result<u64> {
+fn install_inner(
+    url: &str,
+    storage: u32,
+    expected: Option<&str>,
+    emit: &mut dyn FnMut(&str),
+) -> Result<u64> {
     unsafe {
         ffi::mkdir(c"sdmc:/switch".as_ptr(), 0o777);
     }
     let mut chunk = Buffer::new(CHUNK)?;
     crate::log::add("install: downloading");
     http::download_install(url, NSP, &mut chunk, 64 * 1024 * 1024 * 1024)?;
+    if let Some(expected) = expected {
+        let got = crate::md5::file(NSP, &mut chunk, u64::MAX)?;
+        if got.str() != expected {
+            io::remove(NSP);
+            let mut line = Text::<160>::new();
+            use core::fmt::Write;
+            let _ = write!(
+                line,
+                "install: error hash mismatch (got {} expected {}) rc=0",
+                got.str(),
+                expected
+            );
+            crate::log::add(line.str());
+            emit(line.str());
+            return Err(Error("hash mismatch", 0));
+        }
+        crate::log::add("install: hash ok");
+        emit("install: hash ok");
+    }
     INSTALL_PHASE.store(Phase::Writing as u8, Release);
     install_downloaded(storage, &mut chunk)
 }

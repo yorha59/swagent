@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.12-rs\r\n"),
+        ("version", "swagent-1.13-rs\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -903,7 +903,7 @@ fn install_http_range_resume_restart_and_complete() {
     let _guard = SERIAL.lock().unwrap();
     setup();
     let path = "sdmc:/switch/range";
-    for code in [206, 200, 416] {
+    for code in [206, 200] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
             "http://127.0.0.1:{}/range",
@@ -995,8 +995,8 @@ fn install_range_fixtures_across_commands() {
         unsafe {
             host_receive_fixture(core::ptr::null(), 0);
         }
-        if code == 404 {
-            assert_eq!(result, Err(Error("HTTP status", 404)));
+        if code == 404 || code == 416 {
+            assert_eq!(result, Err(Error("HTTP status", code)));
             continue;
         }
         let expected: &[u8] = match code {
@@ -1214,4 +1214,280 @@ fn power_queued_command_and_fallback() {
         assert_eq!(line, format!("{expected}\r\n"));
     }
     protocol::test_session(-1);
+}
+
+#[test]
+fn md5_known_vectors_and_fragmentation() {
+    for (data, expected) in [
+        (Vec::new(), "d41d8cd98f00b204e9800998ecf8427e"),
+        (b"abc".to_vec(), "900150983cd24fb0d6963f7d28e17f72"),
+        (
+            (0..1024 * 1024).map(|i| (i % 256) as u8).collect(),
+            "c35cc7d8d91728a0cb052831bc4ef372",
+        ),
+    ] {
+        for block in [1, 63, 64, 65, 4096, 4 * 1024 * 1024] {
+            let mut h = md5::Md5::new();
+            for part in data.chunks(block) {
+                h.update(part);
+            }
+            assert_eq!(h.finish().str(), expected);
+        }
+    }
+    assert_eq!(
+        md5::expected("md5=900150983CD24FB0D6963F7D28E17F72")
+            .unwrap()
+            .str(),
+        "900150983cd24fb0d6963f7d28e17f72"
+    );
+    for arg in [
+        "md5=abc",
+        "sha256=abcd",
+        "md5=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+    ] {
+        assert!(md5::expected(arg).is_err());
+    }
+}
+
+// Deterministic mock HTTP transport also works where localhost binding is denied.
+#[test]
+fn download_hash_gate_and_restart_truncation() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    unsafe extern "C" {
+        fn host_receive_fixture(p: *const core::ffi::c_char, error: i32);
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            unsafe {
+                host_receive_fixture(core::ptr::null(), 0);
+            }
+        }
+    }
+    let _reset = Reset;
+    for expected in [
+        "900150983cd24fb0d6963f7d28e17f72",
+        "00000000000000000000000000000000",
+    ] {
+        unsafe {
+            host_reset(0);
+            host_receive_fixture(
+                c"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc".as_ptr(),
+                11,
+            );
+        }
+        let mut lines = Vec::new();
+        let result = install::install_checked(
+            &format!("http://fixture/hash/{expected}"),
+            5,
+            Some(expected),
+            &mut |line| lines.push(line.to_owned()),
+        );
+        if expected.starts_with("900") {
+            assert_eq!(lines, ["install: hash ok"]);
+            // Hash passes, then the intentionally non-PFS0 body is rejected.
+            assert_eq!(result, Err(Error("short file read", 0)));
+        } else {
+            assert_eq!(result, Err(Error("hash mismatch", 0)));
+            assert_eq!(lines,[format!("install: error hash mismatch (got 900150983cd24fb0d6963f7d28e17f72 expected {expected}) rc=0")]);
+        }
+        assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
+        assert_eq!(unsafe { host_stat(1) }, 0); // No NCM registration.
+    }
+    let path = "sdmc:/switch/restart-proof";
+    let url = "http://fixture/restart-proof";
+    let mut chunk = [0; 16];
+    unsafe {
+        host_receive_fixture(
+            c"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabcde".as_ptr(),
+            11,
+        );
+    }
+    assert!(http::download_install(url, path, &mut chunk, 100).is_err());
+    assert_eq!(
+        std::fs::metadata("build/host-sd/switch/restart-proof")
+            .unwrap()
+            .len(),
+        5
+    );
+    unsafe {
+        host_receive_fixture(c"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 5-6/7\r\n\r\nfg".as_ptr(),11);
+    }
+    assert_eq!(
+        http::download_install(url, path, &mut chunk, 100),
+        Err(Error("Content-Range total mismatch", 0))
+    );
+    assert_eq!(
+        std::fs::read("build/host-sd/switch/restart-proof").unwrap(),
+        b"abcde"
+    );
+    unsafe {
+        host_receive_fixture(c"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n".as_ptr(), 11);
+    }
+    assert!(http::download_install(url, path, &mut chunk, 100).is_err());
+    assert_eq!(install::progress().1, 0);
+    assert_eq!(
+        std::fs::metadata("build/host-sd/switch/restart-proof")
+            .unwrap()
+            .len(),
+        0
+    );
+    unsafe {
+        host_receive_fixture(
+            c"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nxy".as_ptr(),
+            11,
+        );
+    }
+    assert_eq!(
+        http::download_install(url, path, &mut chunk, 100).unwrap(),
+        2
+    );
+    assert_eq!(
+        std::fs::read("build/host-sd/switch/restart-proof").unwrap(),
+        b"xy"
+    );
+    assert_eq!(install::progress().1, 2);
+}
+
+#[test]
+fn install_hash_mock_http_server() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let body = package();
+    let mut h = md5::Md5::new();
+    h.update(&body);
+    let digest = h.finish();
+    for expected in [digest.str(), "00000000000000000000000000000000"] {
+        unsafe {
+            host_reset(0);
+        }
+        let (url, server) = server(body.clone(), false, false);
+        let mut lines = Vec::new();
+        let result =
+            install::install_checked(&url, 5, Some(expected), &mut |s| lines.push(s.to_owned()));
+        server.join().unwrap();
+        if expected == digest.str() {
+            assert!(result.is_ok());
+            assert_eq!(lines, ["install: hash ok"]);
+            assert_eq!(unsafe { host_stat(1) }, 2);
+        } else {
+            assert_eq!(result, Err(Error("hash mismatch", 0)));
+            assert_eq!(unsafe { host_stat(1) }, 0);
+        }
+        assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
+    }
+}
+
+#[test]
+fn hash_query_streams_and_enforces_read_rules() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::{io::AsRawFd, net::UnixStream},
+    };
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let body: Vec<u8> = (0..4 * 1024 * 1024 + 71).map(|i| (i % 251) as u8).collect();
+    std::fs::write("build/host-sd/switch/hash-query", &body).unwrap();
+    let mut h = md5::Md5::new();
+    h.update(&body);
+    let (server, client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut reader = BufReader::new(client);
+    for (command, expected) in [
+        (
+            "hash sdmc:/switch/hash-query",
+            format!("hash: md5 {}\r\n", h.finish().str()),
+        ),
+        (
+            "hash ../switch/hash-query",
+            "hash: error path not allowed rc=0\r\n".to_owned(),
+        ),
+    ] {
+        protocol::test_receive(command);
+        protocol::test_run_one();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, expected);
+    }
+    let f = std::fs::File::create("build/host-sd/switch/hash-query").unwrap();
+    f.set_len(8 * 1024 * 1024 * 1024 + 1).unwrap();
+    drop(f);
+    protocol::test_receive("hash switch/hash-query");
+    protocol::test_run_one();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "hash: error too large rc=0\r\n");
+    std::fs::remove_file("build/host-sd/switch/hash-query").unwrap();
+}
+
+#[test]
+fn install_hash_includes_resumed_prefix() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    unsafe extern "C" {
+        fn host_receive_fixture(p: *const core::ffi::c_char, error: i32);
+    }
+    let mut chunk = [0; 16];
+    for (suffix,expected_line) in [
+        (c"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 3-5/6\r\n\r\ndef", "install: hash ok"),
+        (c"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 3-5/6\r\n\r\ndeg", "install: error hash mismatch"),
+    ] {
+        let url=format!("http://fixture/hash-resume/{expected_line}").replace(' ',"-");
+        unsafe { host_reset(0); host_receive_fixture(c"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc".as_ptr(),11); }
+        assert!(http::download_install(&url,"sdmc:/switch/.install.tmp.nsp",&mut chunk,100).is_err());
+        unsafe { host_receive_fixture(suffix.as_ptr(),11); }
+        let mut lines=Vec::new();
+        let result=install::install_checked(&url,5,Some("e80b5017098950fc58aad83c8c14978e"),&mut |line| lines.push(line.to_owned()));
+        unsafe { host_receive_fixture(core::ptr::null(),0); }
+        assert!(result.is_err());
+        assert!(lines[0].starts_with(expected_line));
+        assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
+        assert_eq!(unsafe { host_stat(1) },0);
+    }
+}
+
+#[test]
+fn full_install_hash_binary_http_transport() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    unsafe extern "C" {
+        fn host_receive_bytes(p: *const u8, n: usize, error: i32);
+    }
+    let body = package();
+    let mut hash = md5::Md5::new();
+    hash.update(&body);
+    let digest = hash.finish();
+    let mut response =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    response.extend_from_slice(&body);
+    for expected in [digest.str(), "00000000000000000000000000000000"] {
+        unsafe {
+            host_reset(0);
+            host_receive_bytes(response.as_ptr(), response.len(), 11);
+        }
+        let mut lines = Vec::new();
+        let result = install::install_checked(
+            &format!("http://fixture/binary/{expected}"),
+            5,
+            Some(expected),
+            &mut |s| lines.push(s.to_owned()),
+        );
+        unsafe {
+            host_receive_bytes(core::ptr::null(), 0, 0);
+        }
+        if expected == digest.str() {
+            assert_eq!(result.unwrap(), 0x0100123400000000);
+            assert_eq!(lines, ["install: hash ok"]);
+            assert_eq!(unsafe { host_stat(1) }, 2);
+        } else {
+            assert_eq!(result, Err(Error("hash mismatch", 0)));
+            assert!(lines[0].starts_with("install: error hash mismatch (got "));
+            assert_eq!(unsafe { host_stat(1) }, 0);
+        }
+        assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
+    }
 }

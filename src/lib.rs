@@ -5,6 +5,7 @@ mod http;
 mod install;
 mod io;
 mod log;
+mod md5;
 mod net;
 mod protocol;
 mod power;
@@ -31,7 +32,7 @@ pub extern "C" fn agent_main() -> ! {
         util::sleep(5000);
     }
     sleep_guard::recover();
-    log::add("swagent-1.12-rs");
+    log::add("swagent-1.13-rs");
     loop {
         let code = unsafe { ffi::sa_spawn(0, protocol::worker, core::ptr::null_mut()) };
         if code == 0 {

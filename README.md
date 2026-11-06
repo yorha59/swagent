@@ -59,7 +59,7 @@ then recovers. Commands are case-sensitive.
 | --- | --- |
 | `ping` | `pong` |
 | `version` | `swagent-1.9-rs` |
-| `install http://host[:port]/file.nsp [sd\|nand]` | `install: ok TITLEID`, or `install: error WHAT rc=N` |
+| `install http://host[:port]/file.nsp [sd\|nand] [md5=HEX]` | `install: ok TITLEID`, or `install: error WHAT rc=N` |
 | `update http://host[:port]/exefs.nsp` | `update: ok` then disconnect, or `update: error WHAT rc=N` |
 | `launch TITLEID` | `launch: ok TITLEID`, or `launch: error rc=N` |
 | `quit TITLEID` | `quit: ok PID`, `quit: not running`, or `quit: error rc=N` (self: `quit: refusing self`) |
@@ -116,7 +116,7 @@ size. Files are accessed through 64-bit libnx FS offsets.
 
 Installation follows the inspected Goldleaf sequence:
 
-1. Stream HTTP to `sdmc:/switch/.install.tmp.nsp` (up to 32 GiB).
+1. Stream HTTP to `sdmc:/switch/.install.tmp.nsp` (up to 64 GiB).
 2. Validate PFS0 names, table/file bounds, duplicate/overlapping entries.
 3. Import matching ticket/certificate pairs through ES command 1, clearing the
    temporary ticket bit. Ticketless content is accepted; a missing certificate
@@ -200,3 +200,26 @@ Read-only keys: `set firmware`, `set hostname` (console nickname, not DNS),
 uses the modern ts session API, 10.0.0+). Responses are `set: KEY VALUE`.
 Service failures return command errors with the result code. No generic settings
 writer or ini writes are provided.
+
+### Download integrity (swagent-1.13-rs)
+
+`install URL sd md5=HEX` (also `nand`) verifies the entire completed temporary
+file, including any resumed prefix, before PFS0 validation or NCM writes. The
+optional digest must contain 32 hexadecimal digits (case insensitive). Only MD5
+is supported; SHA-256 arguments are rejected. Without a digest, installation
+retains its previous behavior and has no end-to-end integrity guarantee.
+Hashing streams through the existing 4 MiB buffer. Success logs and replies
+`install: hash ok`. A mismatch deletes the temporary NSP, logs and replies
+`install: error hash mismatch (got X expected Y) rc=0`, and stops installation.
+
+`hash SD-PATH` replies `hash: md5 HEX`. It uses the same read-path whitelist as
+`cat` (any SD path, no traversal), with an 8 GiB size cap and a 4 MiB streaming
+buffer. This cap applies only to the query; install verification supports the
+full 64 GiB download limit. MD5 detects accidental corruption; it does not
+provide authenticity against deliberate modification.
+
+Resumed responses must be 206 with a valid Content-Range whose total equals
+the original response's known total. A 200 response discards the prefix and
+restarts with a truncated file and a zero byte counter. A 416 response is an
+error, never proof that a partial file is complete. When the original total is
+unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
