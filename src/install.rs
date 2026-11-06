@@ -421,7 +421,8 @@ pub fn install(url: &str, storage: u32) -> Result<u64> {
     INSTALL_RX_BYTES.store(0, Relaxed);
     INSTALL_TOTAL_BYTES.store(0, Relaxed);
     INSTALL_PHASE.store(Phase::Downloading as u8, Release);
-    let result = install_inner(url, storage);
+    let result = crate::sleep_guard::begin().and_then(|_| install_inner(url, storage));
+    crate::sleep_guard::restore();
     INSTALL_PHASE.store(
         if result.is_ok() {
             Phase::Done
