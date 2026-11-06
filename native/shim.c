@@ -186,10 +186,16 @@ u32 sa_ns(unsigned cmd,const void *in,u32 in_size,void *buf,size_t size,u32 *cou
     if (s==&owned) serviceClose(&owned);
     return rc;
 }
-u32 sa_launch(u64 *pid) {
+/* PM determines application type from program metadata. 0x10 is
+ * StartSuspended on 5.0.0+, not an Application flag. Storage 0 resolves
+ * installed non-gamecard programs (NcmStorageId_None in this libnx). */
+u32 sa_pm_launch(u64 title_id, u64 *pid) {
     Result rc=pmshellInitialize(); if(rc) return rc;
-    NcmProgramLocation loc={.program_id=0x430000000000000B,.storageID=NcmStorageId_None};
-    rc=pmshellLaunchProgram(0,&loc,pid); pmshellExit(); return rc;
+    NcmProgramLocation loc={.program_id=title_id,.storageID=NcmStorageId_None};
+    rc=pmshellLaunchProgram(PmLaunchFlag_None,&loc,pid); pmshellExit(); return rc;
+}
+u32 sa_launch(u64 *pid) {
+    return sa_pm_launch(0x430000000000000B,pid);
 }
 /* Process termination belongs to pm:shell, not pm:dmnt, in libnx. */
 u32 sa_terminate(u64 pid) {

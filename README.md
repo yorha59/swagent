@@ -58,10 +58,23 @@ then recovers. Commands are case-sensitive.
 | Command | Response |
 | --- | --- |
 | `ping` | `pong` |
-| `version` | `swagent-1.3-rs` |
+| `version` | `swagent-1.8-rs` |
 | `install http://host[:port]/file.nsp [sd\|nand]` | `install: ok TITLEID`, or `install: error WHAT rc=N` |
 | `update http://host[:port]/exefs.nsp` | `update: ok` then disconnect, or `update: error WHAT rc=N` |
+| `launch TITLEID` | `launch: ok TITLEID`, or `launch: error rc=N` |
+| `quit TITLEID` | `quit: ok PID`, `quit: not running`, or `quit: error rc=N` (self: `quit: refusing self`) |
 | `log [N]` | Up to N ring entries, then `log: end` (default 100, max 1000) |
+
+`launch` and `quit` require exactly 16 hexadecimal digits without a `0x`
+prefix; successful launch replies normalize the ID to lowercase. Invalid
+arguments return `COMMAND: error expected 16-hex-digit title ID rc=0`.
+Launch uses `pm:shell` with storage 0 (installed non-gamecard resolution) and
+32-bit flags 0. In libnx `pm.h`, 0x10 means StartSuspended on firmware 5.0.0+;
+it is not an application selector. The applet launch API requires an application
+or library-applet context and is unsuitable for this background sysmodule.
+The ring log records launch attempts and results. Quit scans the same process
+list as `ps`, skipping failed program-ID lookups (processes may have exited),
+and uses the same PM termination path and self-protection as `kill`.
 
 The receive thread executes `ping`, `version` and `update` directly. Every
 other command uses the eight-entry worker queue; overflow returns exactly

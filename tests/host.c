@@ -83,8 +83,12 @@ uint32_t nsCountApplicationContentMeta(uint64_t app,int32_t *out){(void)app;*out
 uint32_t sa_ns(uint32_t cmd,const void *in,uint32_t n,void *p,size_t size,uint32_t *count){(void)in;(void)n;(void)p;(void)size;(void)count;ns_commands|=1u<<(cmd==16?0:cmd==17?1:2);return 0;}
 
 uint32_t sa_rename(const char *a,const char *b){char from[1024],to[1024];path(a,from);path(b,to);return rename(from,to)?errno:0;}
-static uint32_t launch_result;
-void host_launch_result(uint32_t rc){launch_result=rc;}
+static uint32_t launch_result, launch_calls;
+static uint64_t launched_title;
+uint64_t host_launched_title(void){return launched_title;}
+uint32_t host_launch_calls(void){return launch_calls;}
+void host_launch_result(uint32_t rc){launch_result=rc;launch_calls=0;launched_title=0;}
+uint32_t sa_pm_launch(uint64_t title,uint64_t *pid){launched_title=title;launch_calls++;*pid=123;return launch_result;}
 uint32_t sa_launch(uint64_t *pid){*pid=123;return launch_result;}
 static uint32_t process_failure, terminated, info_exits;
 void host_process_reset(uint32_t fail){process_failure=fail;terminated=info_exits=0;}
