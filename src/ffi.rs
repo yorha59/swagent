@@ -94,6 +94,7 @@ extern "C" {
     pub fn nsCountApplicationContentMeta(id: u64, count: *mut i32) -> u32;
     pub fn sa_ns(cmd: u32, p: *const u8, n: u32, buf: *mut u8, size: usize, count: *mut u32)
         -> u32;
+    pub fn sa_pm_launch(title_id: u64, pid: *mut u64) -> u32;
     pub fn sa_launch(pid: *mut u64) -> u32;
     pub fn svcGetProcessId(pid: *mut u64, handle: u32) -> u32;
     pub fn svcGetProcessList(count: *mut i32, pids: *mut u64, capacity: u32) -> u32;

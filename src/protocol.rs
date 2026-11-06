@@ -136,12 +136,101 @@ pub extern "C" fn worker(_: *mut core::ffi::c_void) {
         }
     }
 }
+fn title_arg(words: &mut core::str::SplitAsciiWhitespace<'_>) -> Result<u64> {
+    let title = words
+        .next()
+        .ok_or(Error("expected 16-hex-digit title ID", 0))?;
+    if title.len() != 16 || !title.bytes().all(|b| b.is_ascii_hexdigit()) || words.next().is_some()
+    {
+        return Err(Error("expected 16-hex-digit title ID", 0));
+    }
+    u64::from_str_radix(title, 16).map_err(|_| Error("invalid title ID", 0))
+}
+fn process_list(pids: &mut [u64; 1024]) -> Result<usize> {
+    // Installed libnx has no PM enumeration API. The NPDM allows
+    // svcGetProcessList, which includes all resident processes.
+    let mut count = 0;
+    rc(
+        unsafe { ffi::svcGetProcessList(&mut count, pids.as_mut_ptr(), pids.len() as u32) },
+        "list processes",
+    )?;
+    if count < 0 || count as usize > pids.len() {
+        return Err(Error("process list exceeds capacity", 0));
+    }
+    Ok(count as usize)
+}
+struct Info;
+impl Drop for Info {
+    fn drop(&mut self) {
+        unsafe { ffi::pminfoExit() }
+    }
+}
+fn process_info() -> Result<Info> {
+    rc(unsafe { ffi::pminfoInitialize() }, "initialize pm:info")?;
+    Ok(Info)
+}
+fn quit_title(title: u64) -> Result<Option<u64>> {
+    let mut pids = [0u64; 1024];
+    let count = process_list(&mut pids)?;
+    let _info = process_info()?;
+    for &pid in &pids[..count] {
+        let mut program = 0;
+        // Processes can exit between enumeration and lookup, as with ps.
+        if unsafe { ffi::pminfoGetProgramId(&mut program, pid) } != 0 || program != title {
+            continue;
+        }
+        let mut own_pid = 0;
+        rc(
+            unsafe { ffi::svcGetProcessId(&mut own_pid, 0xffff8001) },
+            "get own pid",
+        )?;
+        if pid == own_pid {
+            return Err(Error("refusing self", 0));
+        }
+        rc(unsafe { ffi::sa_terminate(pid) }, "terminate process")?;
+        return Ok(Some(pid));
+    }
+    Ok(None)
+}
 fn execute(job: Job) {
     let id = job.id;
     let mut words = job.line.str().split_ascii_whitespace();
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
+            "launch" | "quit" => {
+                let title = title_arg(&mut words)?;
+                let mut s = Text::<96>::new();
+                if cmd == "launch" {
+                    let _ = write!(s, "launch: attempt {:016x}", title);
+                    log::add(s.str());
+                    s = Text::new();
+                    let mut pid = 0;
+                    let result = unsafe { ffi::sa_pm_launch(title, &mut pid) };
+                    if result == 0 {
+                        let _ = write!(s, "launch: ok {:016x}", title);
+                    } else {
+                        let _ = write!(s, "launch: error rc={}", result);
+                    }
+                } else {
+                    match quit_title(title) {
+                        Ok(Some(pid)) => {
+                            let _ = write!(s, "quit: ok {}", pid);
+                        }
+                        Ok(None) => {
+                            let _ = write!(s, "quit: not running");
+                        }
+                        Err(Error("refusing self", _)) => {
+                            let _ = write!(s, "quit: refusing self");
+                        }
+                        Err(e) => {
+                            let _ = write!(s, "quit: error rc={}", e.1);
+                        }
+                    }
+                }
+                log::add(s.str());
+                reply(id, s.bytes())?;
+            }
             "df" => {
                 if words.next().is_some() {
                     return Err(Error("usage: df", 0));
@@ -176,27 +265,9 @@ fn execute(job: Job) {
                 if words.next().is_some() {
                     return Err(Error("usage: ps", 0));
                 }
-                // Installed libnx has no PM enumeration API. The NPDM allows
-                // svcGetProcessList, which includes all resident processes.
                 let mut pids = [0u64; 1024];
-                let mut count = 0;
-                rc(
-                    unsafe {
-                        ffi::svcGetProcessList(&mut count, pids.as_mut_ptr(), pids.len() as u32)
-                    },
-                    "list processes",
-                )?;
-                if count < 0 || count as usize > pids.len() {
-                    return Err(Error("process list exceeds capacity", 0));
-                }
-                rc(unsafe { ffi::pminfoInitialize() }, "initialize pm:info")?;
-                struct Info;
-                impl Drop for Info {
-                    fn drop(&mut self) {
-                        unsafe { ffi::pminfoExit() }
-                    }
-                }
-                let _info = Info;
+                let count = process_list(&mut pids)?;
+                let _info = process_info()?;
                 for &pid in pids
                     .get(..count as usize)
                     .ok_or(Error("process list exceeds capacity", 0))?
@@ -421,7 +492,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.7-rs");
+            let _ = reply(id, b"swagent-1.8-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {

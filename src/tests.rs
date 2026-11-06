@@ -199,6 +199,116 @@ fn process_commands_queue_self_guard_and_errors() {
     protocol::test_session(-1);
 }
 #[test]
+fn launch_and_quit_commands() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::{io::AsRawFd, net::UnixStream},
+    };
+    unsafe extern "C" {
+        fn host_launched_title() -> u64;
+        fn host_launch_calls() -> u32;
+    }
+    let _guard = SERIAL.lock().unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut client = BufReader::new(client);
+    for (fail, command, expected, terminated, exits) in [
+        (
+            0,
+            "launch 0100123400000000",
+            "launch: ok 0100123400000000",
+            0,
+            0,
+        ),
+        (
+            0,
+            "launch 0100ABCDEF000000",
+            "launch: ok 0100abcdef000000",
+            0,
+            0,
+        ),
+        (0, "quit 0100123400000000", "quit: ok 123", 123, 1),
+        (0, "quit 0000000000000000", "quit: not running", 0, 1),
+        (0, "quit 430000000000000B", "quit: refusing self", 0, 1),
+        (1, "quit 0100123400000000", "quit: error rc=77", 0, 1),
+        (2, "quit 0100123400000000", "quit: error rc=88", 123, 1),
+        (3, "quit 0100123400000000", "quit: error rc=99", 0, 0),
+        (4, "quit 0100123400000000", "quit: error rc=100", 0, 0),
+        (5, "quit 0100123400000000", "quit: not running", 0, 1),
+        (6, "quit 0100123400000000", "quit: error rc=0", 0, 0),
+        (7, "quit 0100123400000000", "quit: not running", 0, 1),
+    ] {
+        unsafe {
+            host_process_reset(fail);
+            host_launch_result(0);
+        }
+        protocol::test_receive(command);
+        assert_eq!(unsafe { host_launch_calls() }, 0);
+        protocol::test_run_one();
+        let mut actual = String::new();
+        client.read_line(&mut actual).unwrap();
+        assert_eq!(actual, format!("{expected}\r\n"), "{command}");
+        assert_eq!(unsafe { host_process_stat(0) }, terminated);
+        assert_eq!(unsafe { host_process_stat(1) }, exits);
+        if command.starts_with("launch") {
+            assert_eq!(unsafe { host_launch_calls() }, 1);
+            assert_eq!(
+                unsafe { host_launched_title() },
+                u64::from_str_radix(command.split_whitespace().nth(1).unwrap(), 16).unwrap()
+            );
+        }
+    }
+    unsafe {
+        host_launch_result(1234);
+    }
+    protocol::test_receive("launch 0100123400000000");
+    protocol::test_run_one();
+    let mut actual = String::new();
+    client.read_line(&mut actual).unwrap();
+    assert_eq!(actual, "launch: error rc=1234\r\n");
+    let mut attempt = false;
+    log::dump(1000, |s| {
+        attempt |= s == b"launch: attempt 0100123400000000"
+    });
+    assert!(attempt);
+    for cmd in ["launch", "quit"] {
+        for arg in [
+            "",
+            "1",
+            "01001234000000000",
+            "0x00123400000000",
+            "g100123400000000",
+            "+100123400000000",
+            "0100123400000000 extra",
+        ] {
+            unsafe {
+                host_launch_result(0);
+                host_process_reset(0);
+            }
+            protocol::test_receive(&format!("{cmd} {arg}"));
+            protocol::test_run_one();
+            let mut actual = String::new();
+            client.read_line(&mut actual).unwrap();
+            assert_eq!(
+                actual,
+                format!("{cmd}: error expected 16-hex-digit title ID rc=0\r\n")
+            );
+            assert_eq!(unsafe { host_launch_calls() }, 0);
+            assert_eq!(unsafe { host_process_stat(0) }, 0);
+            assert_eq!(unsafe { host_process_stat(1) }, 0);
+        }
+    }
+    unsafe {
+        host_launch_result(0);
+        host_process_reset(0);
+    }
+    protocol::test_session(-1);
+}
+
+#[test]
 fn streaming_http_and_truncation() {
     let _guard = SERIAL.lock().unwrap();
     setup();
@@ -483,7 +593,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.7-rs\r\n"),
+        ("version", "swagent-1.8-rs\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
