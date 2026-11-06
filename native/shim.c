@@ -297,3 +297,38 @@ u32 sa_setting_read(u32 key, char *out, size_t capacity) {
     }
     return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 }
+
+/* Read-only power telemetry. Sessions live only for this worker command. */
+u32 sa_power_psm(u32 *percent, u32 *charger) {
+    Result rc = psmInitialize();
+    if (R_FAILED(rc)) return rc;
+    rc = psmGetBatteryChargePercentage(percent);
+    PsmChargerType type;
+    *charger = UINT32_MAX;
+    if (R_SUCCEEDED(psmGetChargerType(&type))) *charger = (u32)type;
+    psmExit();
+    return rc;
+}
+
+/* Hekate bdk/power/max17050.h: VCELL=0x09, Current=0x0A.
+ * bdk/power/max17050.c: I2C_1, address 0x36, little-endian words.
+ * Horizon's device ID selects that bus/address; no direct MMIO is needed. */
+static Result sa_gauge_reg(I2cSession *session, u8 reg, u8 *out) {
+    Result rc = i2csessionSendAuto(session, &reg, 1, I2cTransactionOption_Start);
+    if (R_SUCCEEDED(rc))
+        rc = i2csessionReceiveAuto(session, out, 2, I2cTransactionOption_All);
+    return rc;
+}
+u32 sa_power_gauge(u8 *voltage, u8 *current) {
+    Result rc = i2cInitialize();
+    if (R_FAILED(rc)) return rc;
+    I2cSession session = {0};
+    rc = i2cOpenSession(&session, I2cDevice_Max17050);
+    if (R_SUCCEEDED(rc)) {
+        rc = sa_gauge_reg(&session, 0x09, voltage);
+        if (R_SUCCEEDED(rc)) rc = sa_gauge_reg(&session, 0x0A, current);
+        i2csessionClose(&session);
+    }
+    i2cExit();
+    return rc;
+}

@@ -32,6 +32,8 @@ pub struct SleepSettings {
     pub console: i32,
 }
 extern "C" {
+    pub fn sa_power_psm(percent: *mut u32, charger: *mut u32) -> u32;
+    pub fn sa_power_gauge(voltage: *mut u8, current: *mut u8) -> u32;
     pub fn setsysInitialize() -> u32;
     pub fn setsysExit();
     pub fn setsysGetSleepSettings(out: *mut SleepSettings) -> u32;

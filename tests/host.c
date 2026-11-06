@@ -135,3 +135,14 @@ uint32_t sa_setting_read(uint32_t key, char *out, size_t capacity) {
     const char *values[] = {"23.0.0", "Switch\r\nname", "XAW000000", "87%", "42 C"};
     snprintf(out, capacity, "%s", values[key]); return 0;
 }
+
+static uint32_t power_fail, power_charger;
+void host_power_fixture(uint32_t fail, uint32_t charger) { power_fail=fail; power_charger=charger; }
+uint32_t sa_power_psm(uint32_t *percent, uint32_t *charger) {
+    *percent=87; *charger=power_charger; return power_fail==2?92:0;
+}
+uint32_t sa_power_gauge(uint8_t *voltage, uint8_t *current) {
+    voltage[0]=0x00; voltage[1]=0xb9; /* 3700mV */
+    current[0]=0x00; current[1]=0xe7; /* -1000mA */
+    return power_fail==1?91:0;
+}

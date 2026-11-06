@@ -242,6 +242,19 @@ fn execute(job: Job) {
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
+            "power" => {
+                // Always queued; telemetry and failures do not enter the ring log.
+                let mut s = Text::<256>::new();
+                if words.next().is_some() {
+                    let _ = s.push(b"power: error usage: power rc=0");
+                } else {
+                    match crate::power::read() {
+                        Ok(value) => s = value,
+                        Err(e) => { let _ = write!(s, "power: error {} rc={}", e.0, e.1); }
+                    }
+                }
+                let _ = reply(id, s.bytes());
+            }
             "sleep" => {
                 let on = match (words.next(), words.next()) {
                     (Some("on"), None) => true,
@@ -589,7 +602,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.10-rs");
+            let _ = reply(id, b"swagent-1.11-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {

@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.10-rs\r\n"),
+        ("version", "swagent-1.11-rs\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1167,4 +1167,51 @@ fn sleep_guard_save_restore_and_crash_recovery() {
     unsafe {
         host_settings_fail(0);
     }
+}
+
+#[test]
+fn max17050_decode_fixtures() {
+    // Derived vectors from hekate bdk/power/max17050.c constants:
+    // (raw >> 3)*625/1000 mV; signed raw * 156.25 uA.
+    for (raw, expected) in [(0u16, 0), (7, 0), (8, 0), (16, 1),
+                            (0xb900, 3700), (0xc800, 4000), (0xffff, 5119)] {
+        assert_eq!(crate::power::voltage_mv(raw.to_le_bytes()), expected);
+    }
+    for (raw, expected) in [(0u16, 0.0), (1, 0.15625), (0xffff, -0.15625),
+                            (0x1900, 1000.0), (0xe700, -1000.0),
+                            (0x8000, -5120.0), (0x7fff, 5119.84375)] {
+        assert_eq!(crate::power::current_ma(raw.to_le_bytes()), expected);
+    }
+}
+
+#[test]
+fn power_queued_command_and_fallback() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::AsRawFd, net::UnixStream}};
+    unsafe extern "C" { fn host_power_fixture(fail: u32, charger: u32); }
+    let _guard = SERIAL.lock().unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut client = BufReader::new(client);
+    for (fail, charger, command, expected) in [
+        (0, 0, "power", "power: vbus? no — battery 3700mV -1000.00mA -3.70W soc=87% charger=none"),
+        (0, 1, "power", "power: vbus? no — battery 3700mV -1000.00mA -3.70W soc=87% charger=official"),
+        (0, 2, "power", "power: vbus? no — battery 3700mV -1000.00mA -3.70W soc=87% charger=usb"),
+        (1, 3, "power", "power: soc=87% charger=usb (battery telemetry unavailable: i2c rc=91)"),
+        (2, 0, "power", "power: error read psm rc=92"),
+        (0, 0, "power extra", "power: error usage: power rc=0"),
+    ] {
+        unsafe { host_power_fixture(fail, charger); }
+        protocol::test_receive(command);
+        // ping passes the queued power command before the worker runs.
+        protocol::test_receive("ping");
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, "pong\r\n");
+        protocol::test_run_one();
+        line.clear();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, format!("{expected}\r\n"));
+    }
+    protocol::test_session(-1);
 }
