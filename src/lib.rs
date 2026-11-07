@@ -33,7 +33,7 @@ pub extern "C" fn agent_main() -> ! {
         util::sleep(5000);
     }
     sleep_guard::recover();
-    log::add("swagent-1.14-rs");
+    log::add("swagent-1.15-rs");
     loop {
         let code = unsafe { ffi::sa_spawn(0, protocol::worker, core::ptr::null_mut()) };
         if code == 0 {

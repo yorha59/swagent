@@ -103,6 +103,8 @@ impl Socket {
     pub fn read(&self, p: &mut [u8]) -> Result<usize> {
         crate::net::GATE.with(|_| {
             self.valid()?;
+            // All HTTP header/body/chunk loops share this per-receive deadline.
+            unsafe { ffi::sa_timeout(self.0, 30); }
             let n = unsafe { ffi::sa_recv(self.0, p.as_mut_ptr(), p.len(), 0) };
             if n < 0 {
                 let e = unsafe { ffi::sa_errno() };

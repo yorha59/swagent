@@ -626,7 +626,7 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.14-rs");
+            let _ = reply(id, b"swagent-1.15-rs");
         }
         Some("update") => {
             let result = match (words.next(), words.next()) {
@@ -647,7 +647,51 @@ fn file_reply(id: u64, cmd: &str, path: &str, body: &[u8]) {
         crate::files::run(&crate::files::Sd, cmd, path, body, &mut |b| sock.send(b))
     });
 }
-struct Upload { path: Text<512>, bytes: Buffer, used: usize }
+const PUT_LIMIT: u64 = 268435456;
+struct Upload {
+    path: Text<768>,
+    file: Option<File>,
+    bytes: [u8; 512],
+    buffered: usize,
+    used: u64,
+    size: u64,
+    complete: bool,
+}
+impl Upload {
+    fn push(&mut self, byte: u8) -> Result<bool> {
+        self.bytes[self.buffered] = byte;
+        self.buffered += 1;
+        self.used += 1;
+        if self.buffered == self.bytes.len() || self.used == self.size {
+            self.file.as_mut().unwrap().write(
+                self.used - self.buffered as u64, &self.bytes[..self.buffered])?;
+            self.buffered = 0;
+        }
+        if self.used == self.size {
+            self.file.as_mut().unwrap().flush()?;
+            self.file.take();
+            self.complete = true;
+        }
+        Ok(self.complete)
+    }
+}
+impl Drop for Upload {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.complete { io::remove(self.path.str()); }
+    }
+}
+fn put_size(input: &str) -> Result<u64> {
+    let n = input.parse::<u64>().map_err(|_| Error("usage", 0))?;
+    if n > PUT_LIMIT { return Err(Error("size limit", PUT_LIMIT as u32)); }
+    Ok(n)
+}
+fn file_error(id: u64, cmd: &str, e: Error) {
+    let mut msg = Text::<128>::new();
+    let _ = write!(msg, "{}: error {}", cmd, e.0);
+    if e.0 == "size limit" { let _ = write!(msg, " {}", e.1); }
+    let _ = reply(id, msg.bytes());
+}
 fn file_line(id: u64, line: &str) -> Result<Option<Upload>> {
     let mut words = line.split_ascii_whitespace();
     let cmd = words.next().unwrap_or("");
@@ -655,13 +699,20 @@ fn file_line(id: u64, line: &str) -> Result<Option<Upload>> {
     if cmd == "put" {
         // Invalid uploads close the connection: their unconsumed body must never
         // be interpreted as commands.
-        let n = words.next().and_then(|s| s.parse::<usize>().ok()).ok_or(Error("usage", 0))?;
+        let n = put_size(words.next().ok_or(Error("usage", 0))?)?;
         if words.next().is_some() { return Err(Error("usage", 0)); }
-        crate::files::path(path, true)?;
-        if n > crate::files::MAX { return Err(Error("too large", 0)); }
-        let mut p = Text::new(); p.push(path.as_bytes())?;
-        let upload = Upload { path: p, bytes: Buffer::new(n)?, used: 0 };
-        if n == 0 { file_reply(id, "put", path, &[]); return Ok(None); }
+        let p = crate::files::path(path, true)?;
+        let mut upload = Upload {
+            file: Some(File::open(p.str(), true)?), path: p,
+            bytes: [0; 512], buffered: 0, used: 0, size: n, complete: false,
+        };
+        if n == 0 {
+            upload.file.as_mut().unwrap().flush()?;
+            upload.file.take();
+            upload.complete = true;
+            reply(id, b"put: ok 0")?;
+            return Ok(None);
+        }
         Ok(Some(upload))
     } else {
         if words.next().is_some() { return Err(Error("usage", 0)); }
@@ -713,8 +764,11 @@ pub fn serve() -> ! {
             let mut upload: Option<Upload> = None;
             'client: loop {
                 let mut input = [0; 512];
+                // Every body receive is bounded, independently of header framing.
+                unsafe { ffi::sa_timeout(fd, if upload.is_some() { 30 } else { 2 }); }
                 let n = unsafe { ffi::sa_recv(fd, input.as_mut_ptr(), input.len(), 0) };
                 if n == 0 {
+                    if upload.is_some() { let _ = reply(id, b"put: error timeout/short read"); }
                     break;
                 }
                 if crate::net::pending() {
@@ -722,13 +776,11 @@ pub fn serve() -> ! {
                 }
                 if n < 0 {
                     let e = unsafe { ffi::sa_errno() };
-                    if crate::net::transient(e) {
-                        if upload.is_some() {
-                            let _ = reply(id, b"put: error rc=0");
-                            break;
-                        }
-                        continue;
+                    if upload.is_some() {
+                        let _ = reply(id, b"put: error timeout/short read");
+                        break;
                     }
+                    if crate::net::transient(e) { continue; }
                     crate::net::failed(e);
                     break;
                 }
@@ -737,11 +789,15 @@ pub fn serve() -> ! {
                 };
                 for byte in input {
                     if let Some(u) = upload.as_mut() {
-                        u.bytes[u.used] = *byte;
-                        u.used += 1;
-                        if u.used == u.bytes.len() {
-                            file_reply(id, "put", u.path.str(), &u.bytes);
-                            upload = None;
+                        match u.push(*byte) {
+                            Ok(true) => {
+                                let mut msg = Text::<64>::new();
+                                let _ = write!(msg, "put: ok {}", u.used);
+                                let _ = reply(id, msg.bytes());
+                                upload = None;
+                            }
+                            Ok(false) => {}
+                            Err(e) => { file_error(id, "put", e); break 'client; }
                         }
                         continue;
                     }
@@ -753,9 +809,7 @@ pub fn serve() -> ! {
                                     match file_line(id, line.str()) {
                                         Ok(u) => upload = u,
                                         Err(e) => {
-                                            let mut msg = Text::<128>::new();
-                                            let _ = write!(msg, "{}: error {}", cmd, e.0);
-                                            let _ = reply(id, msg.bytes());
+                                            file_error(id, cmd, e);
                                             if cmd == "put" { break 'client; }
                                         }
                                     }
@@ -772,6 +826,7 @@ pub fn serve() -> ! {
                     }
                 }
             }
+            drop(upload); // Close and delete partial uploads before accepting another client.
             disconnect();
             log::add("client disconnected");
             if crate::net::pending() {
@@ -843,4 +898,36 @@ pub fn test_run_one() {
 #[cfg(test)]
 pub fn test_install_error(e: Error) {
     error(42, "install", e);
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    #[test]
+    fn rejects_oversized_put_before_open_or_allocation() {
+        assert_eq!(put_size("268435456"), Ok(PUT_LIMIT));
+        for n in ["268435457", "2147483648", "18446744073709551615"] {
+            assert!(matches!(file_line(0, &std::format!("put switch/test {n}")),
+                Err(Error("size limit", 268435456))));
+        }
+    }
+    #[test]
+    fn partial_upload_is_deleted() {
+        let path = std::env::temp_dir().join(std::format!("swagent-partial-{}", std::process::id()));
+        let mut p = Text::new();
+        p.push(path.to_str().unwrap().as_bytes()).unwrap();
+        let mut u = Upload {
+            file: Some(File::open(p.str(), true).unwrap()), path: p,
+            bytes: [0; 512], buffered: 0, used: 0, size: 1024, complete: false,
+        };
+        for _ in 0..512 { assert!(!u.push(1).unwrap()); }
+        assert!(path.exists());
+        drop(u);
+        assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+pub fn test_file_line(line: &str) {
+    if let Err(e) = file_line(42, line) { file_error(42, "put", e); }
 }
