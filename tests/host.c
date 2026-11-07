@@ -155,3 +155,9 @@ void fsDirClose(void *d) { (void)d; }
 uint32_t sa_wifi(uint32_t join, const uint8_t *profile, uint8_t *records, int32_t *count) {
     (void)join; (void)profile; (void)records; *count=0; return 123;
 }
+
+void sa_timeout(int fd,int seconds) {
+    struct timeval t={seconds,0};
+    setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t));
+    setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&t,sizeof(t));
+}

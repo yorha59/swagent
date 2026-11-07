@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.14-rs\r\n"),
+        ("version", "swagent-1.15-rs\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1544,4 +1544,20 @@ fn wifi_ipc_error_keeps_worker_responsive() {
         assert_eq!(line, "pong\r\n");
     }
     protocol::test_session(-1);
+}
+
+#[test]
+fn put_size_limit_wire_reply() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::AsRawFd, net::UnixStream}};
+    let _guard = SERIAL.lock().unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut reader = BufReader::new(client);
+    for n in [268435457u64, 2147483648, u64::MAX] {
+        protocol::test_file_line(&format!("put switch/rejected {n}"));
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "put: error size limit 268435456\r\n");
+    }
 }
