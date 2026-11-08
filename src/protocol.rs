@@ -816,6 +816,16 @@ fn file_line(id: u64, line: &str) -> Result<Option<Upload>> {
     let Some(path) = words.next() else {
         return Err(Error("usage", 0));
     };
+    if cmd == "tail" {
+        let n = words.next().map(|v| v.parse::<usize>().map_err(|_| Error("usage", 0)))
+            .transpose()?.unwrap_or(40);
+        if words.next().is_some() { return Err(Error("usage", 0)); }
+        crate::files::tail(path, n, &mut |bytes| session(id).with(|s| {
+            if s.id != id || s.fd < 0 { return Err(Error("disconnected", 0)); }
+            core::mem::ManuallyDrop::new(Socket::new(s.fd)).send(bytes)
+        }))?;
+        return Ok(None);
+    }
     if cmd == "put" {
         // Invalid uploads close the connection: their unconsumed body must never
         // be interpreted as commands.
@@ -922,7 +932,7 @@ fn client_loop(fd: i32, id: u64) {
                 match result {
                     Ok(line) if line.len > 0 => {
                         let cmd = line.str().split_ascii_whitespace().next().unwrap_or("");
-                        if matches!(cmd, "put" | "cat" | "ls" | "mkdir") {
+                        if matches!(cmd, "put" | "cat" | "tail" | "ls" | "mkdir") {
                             match file_line(id, line.str()) {
                                 Ok(u) => upload = u,
                                 Err(e) => {

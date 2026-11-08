@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.28-rs"; }
+const char *sa_version(void) { return "swagent-1.29-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -180,10 +180,46 @@ static Thread threads[6];
 static bool thread_started[6];
 static Mutex listener_lock;
 static int listener_fd=-1;
+/* Includes sockets still connecting, so exit can interrupt every network lane. */
+static int active_sockets[32]; /* fd+1; zero is an unused slot */
+static int track_socket(int fd) {
+    if (fd < 0) return fd;
+    mutexLock(&listener_lock);
+    if (!sa_stopping()) for (unsigned i=0;i<32;i++) if (!active_sockets[i]) {
+        active_sockets[i]=fd+1;
+        mutexUnlock(&listener_lock);
+        return fd;
+    }
+    close(fd);
+    mutexUnlock(&listener_lock);
+    errno=ECANCELED;
+    return -1;
+}
+int sa_close(int fd) {
+    mutexLock(&listener_lock);
+    int result=0;
+    for (unsigned i=0;i<32;i++) if (active_sockets[i]==fd+1) {
+        active_sockets[i]=0;
+        result=close(fd);
+        break;
+    }
+    mutexUnlock(&listener_lock);
+    return result;
+}
+static void close_all_sockets(void) {
+    mutexLock(&listener_lock);
+    if (listener_fd>=0) { shutdown(listener_fd,SHUT_RDWR); close(listener_fd); listener_fd=-1; }
+    for (unsigned i=0;i<32;i++) if (active_sockets[i]) {
+        int fd=active_sockets[i]-1;
+        shutdown(fd,SHUT_RDWR);
+        close(fd);
+        active_sockets[i]=0;
+    }
+    mutexUnlock(&listener_lock);
+}
 void sa_listener_close(int fd) {
     mutexLock(&listener_lock);
-    if (listener_fd==fd) listener_fd=-1;
-    close(fd);
+    if (listener_fd==fd) { listener_fd=-1; close(fd); }
     mutexUnlock(&listener_lock);
 }
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
@@ -207,6 +243,7 @@ static u32 sa_net_init(void) {
     return rc;
 }
 u32 sa_net_reinit(void) {
+    close_all_sockets();
     if (socket_ok) socketExit();
     socket_ok = false;
     return sa_net_init();
@@ -274,28 +311,53 @@ int sa_accept(int fd) {
     if (client>=0 && fcntl(client,F_SETFL,O_NONBLOCK)<0) {
         int e=errno; close(client); errno=e; return -1;
     }
-    return client;
+    if (client>=0) sa_timeout(client,2);
+    return track_socket(client);
 }
 int sa_connect(const char *host, const char *port) {
     struct addrinfo hint = {.ai_family=AF_INET,.ai_socktype=SOCK_STREAM}, *list=NULL;
     if (getaddrinfo(host,port,&hint,&list)) { sa_persist("connect DNS fail rc=-1 errno=113",strlen("connect DNS fail rc=-1 errno=113")); errno=EHOSTUNREACH; return -1; }
     int saved=EHOSTUNREACH; unsigned attempt=0;
     int fd=-1;
-    for (struct addrinfo *p=list;p;p=p->ai_next) {
+    struct addrinfo *p=list;
+    for (attempt=1;p && attempt<=3 && !sa_stopping();attempt++) {
         char trace[256], ip[INET_ADDRSTRLEN];
         struct sockaddr_in *dest=(struct sockaddr_in*)p->ai_addr;
         inet_ntop(AF_INET,&dest->sin_addr,ip,sizeof(ip));
-        snprintf(trace,sizeof(trace),"connect retry attempt=%u destination=%s:%u",++attempt,ip,ntohs(dest->sin_port)); sa_persist(trace,strlen(trace));
-        fd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
-        int socket_errno=fd<0?errno:0;
-        snprintf(trace,sizeof(trace),"socket create rc=%d errno=%d",fd,socket_errno); sa_persist(trace,strlen(trace));
-        if (fd<0) { saved=errno; continue; }
-        sa_timeout(fd,10);
+        snprintf(trace,sizeof(trace),"connect retry attempt=%u destination=%s:%u",attempt,ip,ntohs(dest->sin_port)); sa_persist(trace,strlen(trace));
+        fd=track_socket(socket(p->ai_family,p->ai_socktype,p->ai_protocol));
+        if (fd<0) { saved=errno; goto next; }
+        sa_timeout(fd,2);
+        int flags=fcntl(fd,F_GETFL);
+        if (flags<0 || fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0) { saved=errno; goto failed; }
         snprintf(trace,sizeof(trace),"connect start destination=%s:%u",ip,ntohs(dest->sin_port)); sa_persist(trace,strlen(trace));
-        int cr=connect(fd,p->ai_addr,p->ai_addrlen); int ce=cr?errno:0;
+        u64 deadline=sa_now_ms()+15000;
+        int cr=connect(fd,p->ai_addr,p->ai_addrlen);
+        int ce=cr ? errno : 0;
+        while (cr && (ce==EINPROGRESS || ce==EALREADY || ce==EINTR || ce==EWOULDBLOCK)) {
+            if (sa_stopping()) { ce=ECANCELED; break; }
+            u64 now=sa_now_ms();
+            if (now>=deadline) {
+                ce=ETIMEDOUT;
+                snprintf(trace,sizeof(trace),"connect timeout attempt=%u",attempt); sa_persist(trace,strlen(trace));
+                break;
+            }
+            struct pollfd pollfd={.fd=fd,.events=POLLOUT};
+            int ready=poll(&pollfd,1,(int)((deadline-now)>100 ? 100 : deadline-now));
+            if (ready<0) { if(errno==EINTR) continue; ce=errno; break; }
+            if (!ready) continue;
+            socklen_t len=sizeof(ce);
+            if (getsockopt(fd,SOL_SOCKET,SO_ERROR,&ce,&len)<0) ce=errno;
+            if (!ce) cr=0;
+            break;
+        }
         snprintf(trace,sizeof(trace),"connect rc=%d errno=%d destination=%s:%u",cr,ce,ip,ntohs(dest->sin_port)); sa_persist(trace,strlen(trace));
-        if (!cr) break;
-        saved=ce; close(fd); fd=-1;
+        if (!cr) break; /* Retain nonblocking mode for bounded send/recv. */
+        saved=ce;
+failed:
+        sa_close(fd); fd=-1;
+next:
+        p=p->ai_next ? p->ai_next : list;
     }
     freeaddrinfo(list); if (fd<0) errno=saved; return fd;
 }
@@ -686,9 +748,7 @@ static bool join_until(Thread *thread, const char *name, u64 deadline) {
 static void nro_shutdown(Thread *agent, bool started) {
     sa_quit();
     u64 deadline=sa_now_ms()+3000;
-    mutexLock(&listener_lock);
-    if (listener_fd>=0) shutdown(listener_fd,SHUT_RDWR);
-    mutexUnlock(&listener_lock);
+    close_all_sockets();
     /* The job semaphore is initialized by the listener lane. Its bounded wait
      * observes shutdown even if exit raced with initialization. */
     bool ok=true;

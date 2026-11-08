@@ -200,7 +200,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.28-rs"; }
+const char *sa_version(void) { return "swagent-1.29-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
