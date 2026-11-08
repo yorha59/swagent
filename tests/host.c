@@ -186,7 +186,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.19-rs"; }
+const char *sa_version(void) { return "swagent-1.20-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
@@ -197,3 +197,10 @@ void sa_persist(const uint8_t *p,size_t n){(void)p;(void)n;}
 size_t sa_log_tail(uint8_t *p,size_t n){const char *s="previous boot evidence\n";size_t len=strlen(s);if(n<len)return 0;memcpy(p,s,len);return len;}
 uint32_t sa_installed(int32_t offset,uint64_t *title,uint8_t *name,size_t capacity,int32_t *count){(void)capacity;*count=offset==0;if(*count){*title=0x430000000000000bULL;memcpy(name,"stale swagent",14);}return 0;}
 uint32_t sa_installed_delete(uint64_t title){(void)title;return 0;}
+
+static pthread_mutex_t jobs_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
+static unsigned jobs_count;
+void sa_jobs_init(void) { pthread_mutex_lock(&jobs_mutex); jobs_count=0; pthread_mutex_unlock(&jobs_mutex); }
+void sa_jobs_signal(void) { pthread_mutex_lock(&jobs_mutex); jobs_count++; pthread_cond_signal(&jobs_cond); pthread_mutex_unlock(&jobs_mutex); }
+void sa_jobs_wait(void) { pthread_mutex_lock(&jobs_mutex); while(!jobs_count) pthread_cond_wait(&jobs_cond,&jobs_mutex); jobs_count--; pthread_mutex_unlock(&jobs_mutex); }

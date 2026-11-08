@@ -37,6 +37,7 @@ pub extern "C" fn agent_main() -> ! {
     }
     sleep_guard::recover();
     log::add(version());
+    unsafe { ffi::sa_jobs_init(); }
     loop {
         let code = unsafe { ffi::sa_spawn(0, protocol::worker, core::ptr::null_mut()) };
         if code == 0 {
