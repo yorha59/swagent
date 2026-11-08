@@ -1,6 +1,7 @@
 use crate::{io::File, util::*};
 use core::fmt::Write;
 pub const MAX: usize = 256 * 1024;
+pub const PUT_MAX: usize = 4 * 1024 * 1024;
 
 pub fn path(input: &str, write: bool) -> Result<Text<768>> {
     let p = input
@@ -113,7 +114,7 @@ pub fn run(
                 send(b"cat: end\r\n")
             }
             "put" => {
-                if body.len() > MAX {
+                if body.len() > PUT_MAX {
                     return Err(Error("too large", 0));
                 }
                 vfs.put(p.str(), body)?;

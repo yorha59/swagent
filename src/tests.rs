@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.22-rs sys\r\n"),
+        ("version", "swagent-1.23-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1555,11 +1555,11 @@ fn put_size_limit_wire_reply() {
     client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
     protocol::test_session(server.as_raw_fd());
     let mut reader = BufReader::new(client);
-    for n in [268435457u64, 2147483648, u64::MAX] {
+    for n in [4194305u64, 2147483648, u64::MAX] {
         protocol::test_file_line(&format!("put switch/rejected {n}"));
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
-        assert_eq!(line, "put: error size limit 268435456\r\n");
+        assert_eq!(line, "put: error size limit 4194304\r\n");
     }
 }
 
@@ -1743,7 +1743,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.22-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.23-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1758,7 +1758,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.22-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.23-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -1837,4 +1837,58 @@ fn accepted_commands_wake_persistent_worker_within_one_second() {
     drop(listener);
     unsafe { host_listener_fixture(0, -1, 0); }
     if let Err(e) = result { std::panic::resume_unwind(e); }
+}
+
+#[test]
+fn download_progress_renews_budget_and_stall_expires() {
+    unsafe extern "C" {
+        fn host_receive_bytes(p: *const u8, n: usize, error: i32);
+        fn host_receive_step(ms: u64);
+        fn host_clock_offset(ms: u64);
+    }
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let size = 4 * 1024 * 1024;
+    let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", size * 20).into_bytes();
+    response.resize(response.len() + size * 20, 0x5a);
+    let mut chunk = util::Buffer::new(size).unwrap();
+    unsafe {
+        host_receive_bytes(response.as_ptr(), response.len(), 0);
+        host_receive_step(20_000);
+    }
+    budget::begin();
+    assert_eq!(http::download("http://fixture/progress", "sdmc:/switch/progress", &mut chunk, (size * 20) as u64), Ok((size * 20) as u64));
+    assert!(!budget::expired()); // 400 seconds exceeds ten grace windows.
+    budget::end();
+    unsafe { host_clock_offset(0); host_receive_step(30_001); }
+    budget::begin();
+    assert_eq!(http::download("http://fixture/stall", "sdmc:/switch/progress", &mut chunk, (size * 20) as u64), Err(Error("operation wall-clock budget", 110)));
+    assert!(budget::expired());
+    budget::end();
+    unsafe { host_receive_step(0); host_clock_offset(0); host_receive_bytes(core::ptr::null(), 0, 0); }
+}
+
+#[test]
+fn put_one_megabyte_wire_roundtrip() {
+    unsafe extern "C" { fn host_listener_fixture(enable: i32, fd: i32, error: i32); }
+    use std::{io::{BufRead, BufReader}, os::unix::{io::IntoRawFd, net::UnixStream}};
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let (server, mut client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    unsafe { host_listener_fixture(1, server.into_raw_fd(), 0); }
+    let mut listener = -1;
+    protocol::test_serve_step(&mut listener);
+    let worker = std::thread::spawn(|| protocol::test_client_once(0));
+    let body: Vec<u8> = (0..1024*1024).map(|i| (i % 251) as u8).collect();
+    client.write_all(b"put switch/one-megabyte 1048576\r\n").unwrap();
+    client.write_all(&body).unwrap();
+    let mut reader = BufReader::new(client);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "put: ok 1048576\r\n");
+    assert_eq!(std::fs::read("build/host-sd/switch/one-megabyte").unwrap(), body);
+    drop(reader);
+    worker.join().unwrap();
+    unsafe { ffi::close(listener); host_listener_fixture(0, -1, 0); }
 }

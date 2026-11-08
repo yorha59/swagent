@@ -281,7 +281,7 @@ pub(crate) fn check_budget() {
         if job.deadline == 0 || job.timed_out {
             return None;
         }
-        if now_ms() < job.deadline && !crate::budget::expired() {
+        if !crate::budget::expired() {
             return None;
         }
         job.timed_out = true;
@@ -302,8 +302,8 @@ fn execute(job: Job) {
         crate::budget::begin();
         *state = JobState {
             id: job.id,
-            // Absolute ceiling, independent of byte progress and retry count.
-            deadline: now_ms() + 30 * 60 * 1000,
+            // Nonzero marks an active job; budget owns the progress deadline.
+            deadline: 1,
             timed_out: false,
             install: job.line.str().split_ascii_whitespace().next() == Some("install"),
         };
@@ -755,7 +755,7 @@ fn file_reply(id: u64, cmd: &str, path: &str, body: &[u8]) {
         crate::files::run(&crate::files::Sd, cmd, path, body, &mut |b| sock.send(b))
     });
 }
-const PUT_LIMIT: u64 = 268435456;
+const PUT_LIMIT: u64 = crate::files::PUT_MAX as u64;
 struct Upload {
     path: Text<768>,
     file: Option<File>,
@@ -1089,11 +1089,11 @@ mod upload_tests {
     use super::*;
     #[test]
     fn rejects_oversized_put_before_open_or_allocation() {
-        assert_eq!(put_size("268435456"), Ok(PUT_LIMIT));
-        for n in ["268435457", "2147483648", "18446744073709551615"] {
+        assert_eq!(put_size("4194304"), Ok(PUT_LIMIT));
+        for n in ["4194305", "2147483648", "18446744073709551615"] {
             assert!(matches!(
                 file_line(0, &std::format!("put switch/test {n}")),
-                Err(Error("size limit", 268435456))
+                Err(Error("size limit", 4194304))
             ));
         }
     }

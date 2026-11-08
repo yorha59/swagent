@@ -744,6 +744,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
                 },
                 "write placeholder",
             )?;
+            crate::budget::progress()?;
             off += n as u64;
         }
         rc(

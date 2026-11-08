@@ -292,3 +292,15 @@ with only accept substituted, and print that limitation. It verifies replies and
 logs for eight `ps` commands and an unknown `zzz` command. The checked-in 1.20
 source already had a catch-all enqueue arm; this change does not establish why
 the hardware image omitted those traces. Only the sysmodule NSP is rebuilt.
+
+### 1.23 progress watchdog
+
+`version` reports `swagent-1.23-rs`. Install, update and HTTP downloads use a
+30-second inactivity deadline, renewed by successful receives (up to the existing
+4 MiB chunk size) and disk writes. There is no total runtime ceiling. Retries and
+native call entry do not renew it; blocked calls still quarantine the worker.
+Budget extensions emit a `debug: budget extended` log at most once per minute.
+
+`put PATH SIZE` accepts up to 4 MiB, including binary NRO payloads. The wire
+receiver retains its existing 512-byte streaming buffers and does not allocate a
+second large buffer. `cat` retains its 256 KiB limit and the heap remains 16 MiB.

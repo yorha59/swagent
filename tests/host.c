@@ -28,11 +28,15 @@ int host_fixture_connects(void){return fixture_connects;}
 void host_connect_failure(int error){connect_failure=error;}
 void host_receive_bytes(const void *p,size_t n,int error){receive_fixture=p;receive_length=n;receive_offset=0;fixture_connects=0;receive_error=error;}
 void host_receive_fixture(const char *p,int error){host_receive_bytes(p,p?strlen(p):0,error);}
+static _Thread_local uint64_t receive_step, receive_elapsed;
+void host_clock_offset(uint64_t ms);
+void host_receive_step(uint64_t ms){receive_step=ms;receive_elapsed=0;}
 ssize_t sa_recv(int fd,void *p,size_t n,int flags){
     if(!receive_fixture)return recv(fd,p,n,flags);
     size_t left=receive_length-receive_offset;
     if(!left){errno=receive_error;return -1;}
     if(n>left)n=left;
+    if(n>1 && receive_step){receive_elapsed+=receive_step;host_clock_offset(receive_elapsed);}
     memcpy(p,receive_fixture+receive_offset,n);receive_offset+=n;return n;
 }
 ssize_t sa_send(int fd,const void *p,size_t n,int flags){if(receive_fixture){size_t len=n<sizeof(fixture_request)-1?n:sizeof(fixture_request)-1;memcpy(fixture_request,p,len);fixture_request[len]=0;return n;}return send(fd,p,n,flags);}
@@ -186,7 +190,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.22-rs"; }
+const char *sa_version(void) { return "swagent-1.23-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
