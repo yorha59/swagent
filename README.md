@@ -229,14 +229,14 @@ unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. The console displays
-`swagent-nro swagent-1.20-rs`, the exact `getsockname` bind endpoint
+`swagent-nro swagent-1.21-rs`, the exact `getsockname` bind endpoint
 (`0.0.0.0:6000`). Find the console's LAN IP in system settings and connect on TCP
 port 6000. Stop the sysmodule first if it already owns that port.
 
 PLUS or a bare TCP `quit` exits the NRO. `quit <title-id>` retains the
 existing title termination command. Both editions use the same Rust command
 handlers, installation services, 16 MiB heap and reusable 4 MiB install chunk.
-`version` reports `swagent-1.20-rs nro` or `swagent-1.20-rs sys`.
+`version` reports `swagent-1.21-rs nro` or `swagent-1.21-rs sys`.
 The `update` command retains its resident sysmodule update behavior; it does
 not replace the running NRO file. Installation uses the existing NS/FS path
 and hbloader permissions; actual service availability depends on the console.
@@ -278,3 +278,13 @@ not every worker command. Host verification does not establish the cause of the
 reported hardware stall; the new timestamps are intended to locate it if it
 persists. This release builds only the sysmodule NSP; the existing NRO is not
 updated.
+
+Version 1.21 makes the worker fallback explicit after fast-path returns. Unknown
+commands also enter the queue and reply `error: unknown command: X`. All 1.19
+and 1.20 diagnostics remain. The host regression now uses a real Unix listening
+socket and native `accept()`, followed by admission, client framing, dispatch
+and the persistent worker. Hosts prohibiting socket bind use a real socketpair
+with only accept substituted, and print that limitation. It verifies replies and fresh enqueue
+logs for eight `ps` commands and an unknown `zzz` command. The checked-in 1.20
+source already had a catch-all enqueue arm; this change does not establish why
+the hardware image omitted those traces. Only the sysmodule NSP is rebuilt.

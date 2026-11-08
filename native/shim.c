@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.20-rs"; }
+const char *sa_version(void) { return "swagent-1.21-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;

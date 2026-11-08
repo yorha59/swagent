@@ -557,7 +557,9 @@ fn execute_inner(job: Job) {
             }
             "installed" => crate::installed::run(job.line.str(), &mut |line| reply(id,line))?,
             _ => {
-                reply(id, b"error: unknown command")?;
+                let mut message = Text::<544>::new();
+                let _ = write!(message, "error: unknown command: {}", cmd);
+                reply(id, message.bytes())?;
             }
         }
         Ok(())
@@ -713,26 +715,35 @@ fn receive(id: u64, line: Text<512>) {
                 }
                 _ => { let _=reply(id,b"log: error invalid arguments rc=0"); }
             }
+            return;
         }
         Some("ping") if words.next().is_none() => {
             let _ = reply(id, b"pong");
+            return;
         }
         Some("status") if words.next().is_none() => {
             let (phase, rx, total) = install::progress();
             let s = format_status(phase, rx, total);
             let _ = reply(id, s.bytes());
+            return;
         }
         Some("version") if words.next().is_none() => {
             let mut s = Text::<64>::new();
             let _ = write!(s, "{} {}", crate::version(), if crate::is_nro() { "nro" } else { "sys" });
             let _ = reply(id, s.bytes());
+            return;
         }
         Some("quit") if crate::is_nro() && words.next().is_none() => {
             let _ = reply(id, b"quit: ok");
             unsafe { ffi::sa_quit(); }
+            return;
         }
-        _ => enqueue(id, line),
+        _ => {}
     }
+    // Every non-fast-path command reaches the worker, including unknown names.
+    // Do not gate this on a worker-command allowlist: dispatch errors need a
+    // visible enqueue trace and a worker reply too.
+    enqueue(id, line);
 }
 fn file_reply(id: u64, cmd: &str, path: &str, body: &[u8]) {
     let _ = session(id).with(|s| {
