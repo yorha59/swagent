@@ -997,7 +997,12 @@ fn serve_step(server: &mut i32) {
             let mut line = Text::<96>::new();
             let _ = write!(line, "listener: listen failed errno={}; retrying", -*server);
             log::add(line.str());
-            sleep(250);
+            if crate::is_nro() {
+                // Main thread polls PLUS and refreshes the console independently.
+                for _ in 0..50 { sleep(100); }
+            } else {
+                sleep(250);
+            }
             return;
         }
         LISTENER.store(*server, Release);

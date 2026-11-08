@@ -28,7 +28,7 @@ symbols = subprocess.check_output([nm, root/'build/swagent.elf'], text=True)
 assert re.search(r' T agent_main$', symbols, re.M)
 assert not re.search(r' T (?:_exit|exit|abort)$', symbols, re.M)
 assert not re.search(r'\b(?:sa_(?:hid_init|buttons|touch|capture|jpeg\w*)|hiddbg\w*|capssc\w*|tj\w*)$', symbols, re.M)
-assert b'swagent-1.26-rs' in elf
+assert b'swagent-1.27-rs' in elf
 assert (root/'build/swagent.nsp').read_bytes() == p
 assert (artifact.parent/'flags/boot2.flag').exists()
 print(f'NSP: PFS0 + NSO + NPDM title ID + AArch64 ELF verified; {len(p):,} bytes')
@@ -56,7 +56,9 @@ assert nro[mod:mod+4] == b'MOD0'
 _, bss_start, bss_end = struct.unpack_from('<III', nro, mod+4)
 assert nro_size <= mod+bss_end <= nro_size+struct.unpack_from('<I', nro, 0x38)[0]
 assert mod+bss_start <= mod+bss_end
-assert b'swagent-1.26-rs' in nro and b'listening %s:6000' in nro
+assert b'swagent-1.27-rs' in nro and b'listening %s:6000' in nro
+assert b'port 6000 busy - sysmodule already running' in nro
+assert b'press PLUS to exit' in nro and b'SWAgent %s' in nro
 print(f'NRO: NRO0 + page segments + MOD0/BSS verified; {len(nro):,} bytes')
 
 # Verify hbmenu uses libnx crt0/default runtime rather than resident overrides.

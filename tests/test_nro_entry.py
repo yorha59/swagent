@@ -25,6 +25,14 @@ class NroEntryTest(unittest.TestCase):
             '-I' + str(devkit / 'libnx/include'), str(ROOT / 'native/shim.c'),
         ], text=True)
         check_entry(source)
+        main = source[source.index('int main(void) {'):source.index('size_t sa_log_tail')]
+        for output in re.finditer(r'\bprintf\((?:"(?:\\.|[^"\\])*"|[^";])*;' , main):
+            self.assertRegex(main[output.end():], r'^\s*consoleUpdate\(\(\(void \*\)0\)\)|^\s*consoleUpdate\(NULL\)')
+        self.assertIn('SWAgent %s', main)
+        self.assertIn('port 6000 busy - sysmodule already running', main)
+        self.assertIn('press PLUS to exit', main)
+        self.assertIn('svcSleepThread(100000000)', main)
+        self.assertIn('HidNpadButton_Plus', main)
 
     def test_rejects_output_or_worker_before_init(self):
         for call in ('printf("boot");', 'puts("boot");', 'write(1, p, n);', 'start_worker();'):
