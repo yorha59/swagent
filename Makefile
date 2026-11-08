@@ -49,3 +49,6 @@ check: all nro
 clean:
 	rm -rf build dist
 	$(CARGO) clean
+
+FORCE:
+.PHONY: FORCE
