@@ -8,7 +8,7 @@ NX := $(DEVKITPRO)/libnx
 ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS := $(ARCH) -O2 -g -Wall -Wextra -ffunction-sections -fdata-sections -D__SWITCH__ -I$(NX)/include
 RUSTLIB := target/aarch64-unknown-none/release/libswagent.a
-.PHONY: all rust clean check
+.PHONY: all nro rust clean check
 all: dist/atmosphere/contents/430000000000000B/exefs.nsp
 rust:
 	$(CARGO) build --release
@@ -28,11 +28,21 @@ dist/atmosphere/contents/430000000000000B/exefs.nsp: build/exefs/main build/exef
 	$(TOOLS)/build_pfs0 build/exefs $@
 	touch $(@D)/flags/boot2.flag
 	cp $@ build/swagent.nsp
-check: all
+build/shim-nro.o: native/shim.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -DSA_NRO -c $< -o $@
+build/swagent-nro.elf: rust build/shim-nro.o
+	$(CC) $(ARCH) -specs=$(NX)/switch.specs -Wl,-Map,build/swagent-nro.map build/shim-nro.o $(RUSTLIB) -L$(NX)/lib -lnx -lm -o $@
+nro: dist/switch/swagent.nro
+dist/switch/swagent.nro: build/swagent-nro.elf tools/nro_packer.py
+	mkdir -p $(@D)
+	python3 tools/nro_packer.py $< $@
+check: all nro
 	mkdir -p build
 	cc -Wall -Wextra -c tests/host.c -o build/host.o
 	RUSTFLAGS="-C link-arg=$(CURDIR)/build/host.o -A dead_code" $(CARGO) test --target aarch64-apple-darwin
 	python3 tests/check_artifact.py
+	python3 tests/test_nro_packer.py
 clean:
 	rm -rf build dist
 	$(CARGO) clean

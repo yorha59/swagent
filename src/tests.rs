@@ -594,7 +594,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.16-rs\r\n"),
+        ("version", "swagent-1.17-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1716,4 +1716,26 @@ mod test_transport {
         if tx.send(server).is_err() { return -1; }
         client.into_raw_fd()
     }
+}
+
+#[test]
+fn nro_version_and_bare_quit() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::AsRawFd, net::UnixStream}};
+    extern "C" { fn host_edition(nro: i32); fn host_did_quit() -> i32; }
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.as_raw_fd());
+    unsafe { host_edition(1); }
+    let mut client = BufReader::new(client);
+    for (command, expected) in [("version", "swagent-1.17-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
+        protocol::test_receive(command);
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, expected);
+    }
+    assert_eq!(unsafe { host_did_quit() }, 1);
+    unsafe { host_edition(0); }
+    protocol::test_session(-1);
 }

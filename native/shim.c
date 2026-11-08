@@ -13,16 +13,65 @@
 #include <stdio.h>
 #include <poll.h>
 
+#ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
+#endif
+const char *sa_version(void) { return "swagent-1.17-rs"; }
+int sa_is_nro(void) {
+#ifdef SA_NRO
+    return 1;
+#else
+    return 0;
+#endif
+}
+#ifdef SA_NRO
+#include <stdatomic.h>
+static atomic_bool nro_quit;
+void sa_quit(void) { atomic_store(&nro_quit, true); }
+#else
+void sa_quit(void) {}
+#endif
 void __libnx_initheap(void) {
     static u8 heap[16 * 1024 * 1024] __attribute__((aligned(0x1000)));
     extern void *fake_heap_start, *fake_heap_end;
     fake_heap_start = heap; fake_heap_end = heap + sizeof(heap);
 }
-void __appInit(void) {}
+void __appInit(void) {
+#ifdef SA_NRO
+    smInitialize();
+    appletInitialize();
+    hidInitialize();
+#endif
+}
 void __appExit(void) {}
 extern void agent_main(void);
+#ifdef SA_NRO
+static void nro_agent(void *arg) { (void)arg; agent_main(); }
+int main(void) {
+    consoleInit(NULL);
+    printf("swagent-nro %s\n", sa_version());
+    printf("PLUS or TCP quit: exit to hbmenu\n");
+    PadState pad;
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padInitializeDefault(&pad);
+    Thread agent;
+    Result rc = threadCreate(&agent, nro_agent, NULL, NULL, 0x18000, 44, -2);
+    if (!rc) rc = threadStart(&agent);
+    if (rc) printf("agent startup failed: 0x%x\n", rc);
+    while (appletMainLoop() && !atomic_load(&nro_quit)) {
+        padUpdate(&pad);
+        if (padGetButtonsDown(&pad) & HidNpadButton_Plus) break;
+        consoleUpdate(NULL);
+        svcSleepThread(16000000);
+    }
+    /* All service/socket/thread resources belong to this process. Terminate
+     * together, including a worker potentially blocked in service IPC. */
+    svcExitProcess();
+    return 0;
+}
+#else
 int main(void) { agent_main(); for (;;) svcSleepThread(3600000000000LL); }
+#endif
 static Thread threads[6];
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
     if (slot >= 6) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
@@ -76,6 +125,16 @@ int sa_listen(void) {
     /* Poll accept so worker connect failures can wake the recovery loop even
      * when no client is connected. Do not rely on accept honoring RCVTIMEO. */
     if (fcntl(fd,F_SETFL,O_NONBLOCK) < 0) { int e=errno; close(fd); return -e; }
+    struct sockaddr_in bound;
+    socklen_t bound_len = sizeof(bound);
+    if (getsockname(fd, (struct sockaddr *)&bound, &bound_len) == 0) {
+        printf("TCP listener bound %s:%u\n", inet_ntoa(bound.sin_addr), ntohs(bound.sin_port));
+#ifdef SA_NRO
+        struct in_addr local = {.s_addr = gethostid()};
+        printf("Console IP: %s (listener accepts all interfaces)\n", inet_ntoa(local));
+#endif
+        fflush(stdout);
+    }
     return fd;
 }
 int sa_accept(int fd) {
