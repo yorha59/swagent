@@ -31,8 +31,14 @@ void host_receive_fixture(const char *p,int error){host_receive_bytes(p,p?strlen
 static _Thread_local uint64_t receive_step, receive_elapsed;
 void host_clock_offset(uint64_t ms);
 void host_receive_step(uint64_t ms){receive_step=ms;receive_elapsed=0;}
+static _Thread_local const char *reconnect_fixture;
+void host_reconnect_fixture(const char *p){reconnect_fixture=p;}
+static _Thread_local size_t storm_at;
+static _Thread_local int storm_left;
+void host_receive_storm(size_t at,int count){storm_at=at;storm_left=count;}
 ssize_t sa_recv(int fd,void *p,size_t n,int flags){
     if(!receive_fixture)return recv(fd,p,n,flags);
+    if(storm_left && receive_offset>=storm_at){int errors[]={11,115,4,35,116};errno=errors[storm_left%5];storm_left--;if(receive_step){receive_elapsed+=receive_step;host_clock_offset(receive_elapsed);}return -1;}
     size_t left=receive_length-receive_offset;
     if(!left){errno=receive_error;return -1;}
     if(n>left)n=left;
@@ -48,7 +54,7 @@ extern int host_test_connect(uint16_t port);
 int sa_connect(const char *host,const char *port){
     if(atomic_load(&connect_blocked)){atomic_store(&connect_entered,1);while(atomic_load(&connect_blocked))usleep(1000);errno=ECONNREFUSED;return -1;}
     if(connect_failure){errno=connect_failure;return -1;}
-    if(receive_fixture){fixture_connects++;receive_offset=0;return open("/dev/null",O_RDONLY);}
+    if(receive_fixture){if(fixture_connects && reconnect_fixture){receive_fixture=reconnect_fixture;receive_length=strlen(receive_fixture);}fixture_connects++;receive_offset=0;return open("/dev/null",O_RDONLY);}
     if(!strcmp(host,"127.0.0.1")){int fd=host_test_connect((uint16_t)atoi(port));if(fd<0)errno=ECONNREFUSED;return fd;}
     struct addrinfo hints={.ai_family=AF_INET,.ai_socktype=SOCK_STREAM},*ai=NULL;
     if(getaddrinfo(host,port,&hints,&ai))return -1;
@@ -190,7 +196,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.23-rs"; }
+const char *sa_version(void) { return "swagent-1.24-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }

@@ -137,7 +137,7 @@ pub fn entry(header: &[u8], count: usize, base: u64, i: usize) -> Result<Entry<'
 struct Cleanup;
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        io::remove(NSP);
+        if crate::budget::check().is_ok() { io::remove(NSP); }
         io::remove(CNCA)
     }
 }

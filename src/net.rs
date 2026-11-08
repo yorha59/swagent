@@ -59,7 +59,7 @@ pub fn epoch() -> u64 {
     EPOCH.load(Acquire)
 }
 pub fn transient(rc: i32) -> bool {
-    matches!(rc, 4 | 11 | 35 | 116)
+    matches!(rc, 4 | 11 | 35 | 115 | 116)
 }
 pub fn failed(rc: i32) {
     if !transient(rc) {
