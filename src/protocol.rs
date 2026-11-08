@@ -26,8 +26,10 @@ static CLIENT_READY: [AtomicBool; CLIENTS] = [const { AtomicBool::new(false) }; 
 struct Job {
     id: u64,
     line: Text<512>,
+    queued_ms: u64,
 }
 const EMPTY: Job = Job {
+    queued_ms: 0,
     id: 0,
     line: Text::new(),
 };
@@ -120,7 +122,13 @@ fn error(id: u64, prefix: &str, e: Error) {
     let _ = reply(id, s.bytes());
 }
 fn enqueue(id: u64, line: Text<512>) {
-    let ok = QUEUE.with(|q| q.push(Job { id, line }));
+    let queued_ms = now_ms();
+    let mut trace = Text::<768>::new();
+    let _ = write!(trace, "enqueue: id={} uptime_ms={} cmd={}", id, queued_ms, line.str());
+    log::add(trace.str());
+    let ok = QUEUE.with(|q| q.push(Job { id, line, queued_ms }));
+    // Publish the complete job before waking the consumer. Never signal a full queue.
+    if ok { unsafe { ffi::sa_jobs_signal(); } }
     if !ok {
         let _ = reply(id, b"error: busy");
     }
@@ -128,18 +136,25 @@ fn enqueue(id: u64, line: Text<512>) {
 fn active(id: u64) -> bool {
     session(id).with(|s| s.id == id && s.fd >= 0)
 }
+#[cfg(test)]
+static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 pub extern "C" fn worker(_: *mut core::ffi::c_void) {
+    log::add("worker: ready");
     loop {
         if retiring() {
             forever()
         }
+        unsafe { ffi::sa_jobs_wait(); }
+        #[cfg(test)]
+        if STOP_WORKER.load(Acquire) { return; }
         let job = QUEUE.with(Queue::pop);
         if let Some(job) = job {
+            let mut trace = Text::<768>::new();
+            let _ = write!(trace, "pickup: id={} queue_ms={} cmd={}", job.id, now_ms().saturating_sub(job.queued_ms), job.line.str());
+            log::add(trace.str());
             if active(job.id) {
                 execute(job)
             }
-        } else {
-            sleep(5)
         }
     }
 }
@@ -1006,6 +1021,7 @@ pub fn test_queue() {
     for id in 1..=8 {
         assert!(q.push(Job {
             id,
+            queued_ms: 0,
             line: Text::new()
         }));
     }
@@ -1016,6 +1032,7 @@ pub fn test_queue() {
     for id in 9..=12 {
         assert!(q.push(Job {
             id,
+            queued_ms: 0,
             line: Text::new()
         }));
     }
@@ -1114,4 +1131,15 @@ pub fn test_client_once(slot: usize) {
 #[cfg(test)]
 pub fn test_serve_step(server: &mut i32) {
     serve_step(server);
+}
+
+#[cfg(test)]
+pub fn test_worker_start() {
+    STOP_WORKER.store(false, Release);
+    unsafe { ffi::sa_jobs_init(); }
+}
+#[cfg(test)]
+pub fn test_worker_stop() {
+    STOP_WORKER.store(true, Release);
+    unsafe { ffi::sa_jobs_signal(); }
 }

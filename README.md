@@ -229,14 +229,14 @@ unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. The console displays
-`swagent-nro swagent-1.19-rs`, the exact `getsockname` bind endpoint
+`swagent-nro swagent-1.20-rs`, the exact `getsockname` bind endpoint
 (`0.0.0.0:6000`). Find the console's LAN IP in system settings and connect on TCP
 port 6000. Stop the sysmodule first if it already owns that port.
 
 PLUS or a bare TCP `quit` exits the NRO. `quit <title-id>` retains the
 existing title termination command. Both editions use the same Rust command
 handlers, installation services, 16 MiB heap and reusable 4 MiB install chunk.
-`version` reports `swagent-1.19-rs nro` or `swagent-1.19-rs sys`.
+`version` reports `swagent-1.20-rs nro` or `swagent-1.20-rs sys`.
 The `update` command retains its resident sysmodule update behavior; it does
 not replace the running NRO file. Installation uses the existing NS/FS path
 and hbloader permissions; actual service availability depends on the console.
@@ -260,3 +260,21 @@ del-430000000000000B-confirm` deletes that application completely through NS.
 The confirmation must match the exact 16-digit title ID argument, including case.
 NS service failures are returned as errors; hardware validation is required for
 service availability on each firmware/sysmodule environment.
+
+
+Version 1.20 worker handoff: the producer publishes a job and then signals a
+counting libnx semaphore; the persistent consumer waits on that semaphore rather
+than polling. Startup initializes the semaphore before spawning any lanes.
+`worker: ready`, `enqueue: id=... uptime_ms=... cmd=...`, and
+`pickup: id=... queue_ms=... cmd=...` distinguish startup, arrival, and pickup.
+Queue wait time includes time behind another command; a busy worker cannot
+promise a one-second response. The regression test admits a socketpair through
+the listener, runs client framing and the persistent worker on separate threads,
+and requires eight spaced `ps` replies within one second each.
+
+The 1.16 queue inspection found no missing readiness flag or signal: it used a
+5 ms poll, not a notification primitive. The 1.19 source logged install arguments,
+not every worker command. Host verification does not establish the cause of the
+reported hardware stall; the new timestamps are intended to locate it if it
+persists. This release builds only the sysmodule NSP; the existing NRO is not
+updated.

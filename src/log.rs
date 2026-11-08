@@ -68,7 +68,7 @@ pub fn dump(n: usize, mut send: impl FnMut(&[u8])) {
 pub fn boot_line(ms: u64) -> Text<96> {
     use core::fmt::Write;
     let mut s=Text::new();
-    let _=write!(s,"boot uptime_ms={} version=swagent-1.19-rs",ms);
+    let _=write!(s,"boot uptime_ms={} version=swagent-1.20-rs",ms);
     s
 }
 pub fn file_tail(mut send: impl FnMut(&[u8])) {

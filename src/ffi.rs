@@ -32,6 +32,9 @@ pub struct SleepSettings {
     pub console: i32,
 }
 extern "C" {
+    pub fn sa_jobs_init();
+    pub fn sa_jobs_signal();
+    pub fn sa_jobs_wait();
     pub fn sa_persist(p: *const u8, n: usize);
     pub fn sa_log_tail(p: *mut u8, n: usize) -> usize;
     pub fn sa_installed(offset: i32, title: *mut u64, name: *mut u8, capacity: usize, count: *mut i32) -> u32;

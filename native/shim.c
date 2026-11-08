@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.19-rs"; }
+const char *sa_version(void) { return "swagent-1.20-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -138,6 +138,10 @@ static void sa_trace(const char *step,int rc) {
     char line[192]; snprintf(line,sizeof(line),"boot uptime_ms=%llu step=%s %s rc=%d",(unsigned long long)sa_now_ms(),step,rc?"fail":"ok",rc);
     sa_persist(line,strlen(line));
 }
+static Semaphore jobs_ready;
+void sa_jobs_init(void) { semaphoreInit(&jobs_ready, 0); }
+void sa_jobs_signal(void) { semaphoreSignal(&jobs_ready); }
+void sa_jobs_wait(void) { semaphoreWait(&jobs_ready); }
 static Thread threads[6];
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
     if (slot >= 6) return MAKERESULT(Module_Libnx,LibnxError_BadInput);

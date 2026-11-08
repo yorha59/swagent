@@ -594,7 +594,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.19-rs sys\r\n"),
+        ("version", "swagent-1.20-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1738,7 +1738,7 @@ fn nro_version_and_bare_quit() {
     protocol::test_session(server.as_raw_fd());
     unsafe { host_edition(1); }
     let mut client = BufReader::new(client);
-    for (command, expected) in [("version", "swagent-1.19-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
+    for (command, expected) in [("version", "swagent-1.20-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
         protocol::test_receive(command);
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
@@ -1751,7 +1751,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.19-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.20-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -1760,4 +1760,47 @@ fn boot_log_format_and_installed_confirmation() {
     let mut lines=Vec::new();
     installed::run("installed",&mut |p| {lines.push(p.to_vec()); Ok(())}).unwrap();
     assert_eq!(lines[0],b"430000000000000B stale swagent");
+}
+
+#[test]
+fn accepted_commands_wake_persistent_worker_within_one_second() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::IntoRawFd, net::UnixStream}, time::{Duration, Instant}};
+    unsafe extern "C" { fn host_listener_fixture(enabled: i32, client: i32, error: i32); }
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    protocol::test_session(-1);
+    protocol::test_worker_start();
+    let worker = std::thread::spawn(|| protocol::worker(core::ptr::null_mut()));
+    let (server, mut client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    unsafe { host_listener_fixture(1, server.into_raw_fd(), 0); }
+    assert!(protocol::test_listener_step(-1));
+    let lane = std::thread::spawn(|| protocol::test_client_once(0));
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Separate arrivals exercise the worker both asleep and already running.
+        for _ in 0..8 {
+            std::thread::sleep(Duration::from_millis(20));
+            let start = Instant::now();
+            client.write_all(b"ps\r\n").unwrap();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                assert!(line.starts_with("ps: "), "{line}");
+                if line == "ps: end\r\n" { break; }
+            }
+            assert!(start.elapsed() < Duration::from_secs(1));
+        }
+        let mut lines = Vec::new();
+        log::dump(100, |line| lines.push(String::from_utf8_lossy(line).into_owned()));
+        assert!(lines.iter().any(|s| s.starts_with("enqueue:") && s.ends_with("cmd=ps")));
+        assert!(lines.iter().any(|s| s.starts_with("pickup:") && s.contains("queue_ms=") && s.ends_with("cmd=ps")));
+    }));
+    client.shutdown(std::net::Shutdown::Both).unwrap();
+    drop(reader);
+    lane.join().unwrap();
+    protocol::test_worker_stop();
+    worker.join().unwrap();
+    unsafe { host_listener_fixture(0, -1, 0); }
+    if let Err(e) = result { std::panic::resume_unwind(e); }
 }
