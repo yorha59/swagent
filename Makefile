@@ -34,9 +34,12 @@ build/shim-nro.o: native/shim.c
 build/swagent-nro.elf: rust build/shim-nro.o
 	$(CC) $(ARCH) -specs=$(NX)/switch.specs -Wl,-Map,build/swagent-nro.map build/shim-nro.o $(RUSTLIB) -L$(NX)/lib -lnx -lm -o $@
 nro: dist/switch/swagent.nro
-dist/switch/swagent.nro: build/swagent-nro.elf tools/nro_packer.py
+dist/switch/swagent.nro: build/swagent-nro.elf build/control.nacp
 	mkdir -p $(@D)
-	$(DEVKITPRO)/tools/bin/elf2nro $< $@
+	$(DEVKITPRO)/tools/bin/elf2nro $< $@ --nacp=build/control.nacp --icon=$(DEVKITPRO)/libnx/default_icon.jpg
+
+build/control.nacp: FORCE
+	$(DEVKITPRO)/tools/bin/nacptool --create "SWAgent" "Simon" "$(VERSION)" $@
 check: all nro
 	mkdir -p build
 	cc -Wall -Wextra -c tests/host.c -o build/host.o
