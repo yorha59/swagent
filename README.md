@@ -342,3 +342,19 @@ exit, but cannot leave a live thread executing an unmapped NRO image.
 Host lifecycle tests execute the production spawn/join and shutdown functions
 with pthread adapters, check flag propagation and all eight joins before return,
 and verify that a refused join never returns.
+
+
+Version 1.29 (`swagent-1.29-rs`) adds `tail <SD-path> [n]` (default 40).
+It scans backwards in 4 KiB blocks, then streams the selected bytes between
+`tail: begin` and `tail: end` replies, preserving original line endings and a
+missing final newline. Zero lines returns empty content. Memory is constant even
+for files or individual lines larger than the heap. `cat` retains its 256 KiB
+cap: concurrent whole-file allocations make a 4 MiB cap unsafe on the 16 MiB heap.
+
+Outbound TCP sockets are nonblocking before connect. Polling has a 15-second
+monotonic deadline per attempt, at most three attempts, and logs
+`connect timeout attempt=N` before closing and retrying. DNS resolution precedes
+this TCP deadline. Accepted and outbound sockets have receive/send timeouts.
+NRO shutdown closes the listener and all tracked accepted/outbound sockets before
+joining any thread; socket creation is rejected after shutdown starts. These are
+shutdown safeguards, not a diagnosis of the reported system-process crash.

@@ -92,6 +92,43 @@ impl Vfs for Sd {
         }
     }
 }
+// Two passes, constant memory even for a single line larger than the heap.
+pub fn tail_scan(size: u64, lines: usize, read: &mut dyn FnMut(u64, &mut [u8]) -> Result,
+                 send: &mut dyn FnMut(&[u8]) -> Result) -> Result {
+    let mut block = [0u8; 4096];
+    let mut start = size;
+    let mut remaining = lines;
+    if lines > 0 {
+        'scan: while start > 0 {
+            let end = start;
+            start = end.saturating_sub(block.len() as u64);
+            let len = (end - start) as usize;
+            read(start, &mut block[..len])?;
+            for i in (0..len).rev() {
+                // A final newline terminates the last line; it is not an empty line.
+                if block[i] == b'\n' && start + i as u64 + 1 != size {
+                    remaining -= 1;
+                    if remaining == 0 { start += i as u64 + 1; break 'scan; }
+                }
+            }
+        }
+    }
+    send(b"tail: begin\r\n")?;
+    while start < size {
+        let len = core::cmp::min(size - start, block.len() as u64) as usize;
+        read(start, &mut block[..len])?;
+        send(&block[..len])?;
+        start += len as u64;
+    }
+    send(b"tail: end\r\n")
+}
+pub fn tail(input: &str, lines: usize, send: &mut dyn FnMut(&[u8]) -> Result) -> Result {
+    let p = path(input, false)?;
+    let mut f = File::open(p.str(), false)?;
+    let size = f.size()?;
+    tail_scan(size, lines, &mut |off, bytes| f.read(off, bytes), send)
+}
+
 pub fn run(
     vfs: &impl Vfs,
     cmd: &str,
@@ -199,6 +236,32 @@ mod tests {
                 )?;
             }
             Ok(())
+        }
+    }
+    #[test]
+    fn backwards_tail_boundaries_and_large_files() {
+        for size in [0, 1, 4095, 4096, 4097, 384 * 1024, 5 * 1024 * 1024] {
+            for final_newline in [false, true] {
+                let mut data: Vec<u8> = (0..size).map(|i| if i % 97 == 0 { b'\n' } else { b'x' }).collect();
+                if final_newline { data.push(b'\n'); }
+                for n in [0, 1, 40, 100000] {
+                    let mut out = Vec::new();
+                    let mut max_read = 0;
+                    tail_scan(data.len() as u64, n, &mut |off, b| {
+                        max_read = max_read.max(b.len());
+                        b.copy_from_slice(&data[off as usize..off as usize + b.len()]); Ok(())
+                    }, &mut |b| { out.extend_from_slice(b); Ok(()) }).unwrap();
+                    let mut starts = vec![0];
+                    for (i, b) in data.iter().enumerate() {
+                        if *b == b'\n' && i + 1 < data.len() { starts.push(i + 1); }
+                    }
+                    let start = if n == 0 { data.len() } else { starts[starts.len().saturating_sub(n)] };
+                    let mut expected = b"tail: begin\r\n".to_vec();
+                    expected.extend_from_slice(&data[start..]); expected.extend_from_slice(b"tail: end\r\n");
+                    assert_eq!(out, expected);
+                    assert!(max_read <= 4096);
+                }
+            }
         }
     }
     #[test]

@@ -76,6 +76,7 @@ extern "C" {
     pub fn sa_connect(host: *const c_char, port: *const c_char) -> i32;
     pub fn sa_timeout(fd: i32, secs: i32);
     pub fn sa_errno() -> i32;
+    #[cfg_attr(not(test), link_name = "sa_close")]
     pub fn close(fd: i32) -> i32;
     pub fn shutdown(fd: i32, how: i32) -> i32;
     pub fn sa_recv(fd: i32, p: *mut u8, n: usize, flags: i32) -> isize;

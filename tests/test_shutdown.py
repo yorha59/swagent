@@ -44,8 +44,10 @@ static Thread threads[6], log_thread;
 static bool thread_started[6], log_started;
 static Mutex listener_lock=PTHREAD_MUTEX_INITIALIZER;
 static int listener_fd=-1;
+static int active_sockets[32];
 static atomic_int stopped, joins, closes, ready;
 static int refuse;
+static int blocked_pair[2];
 static void mutexLock(Mutex *m) { pthread_mutex_lock(m); }
 static void mutexUnlock(Mutex *m) { pthread_mutex_unlock(m); }
 static void *run(void *p) { Thread *t=p; t->fn(t->arg); return NULL; }
@@ -65,14 +67,15 @@ static void svcSleepThread(uint64_t ns) { usleep(ns/1000); }
         body = '\n'.join(function(s) for s in [
             'void sa_quit(void)', 'int sa_stopping(void)',
             'u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg)',
+            'static void close_all_sockets(void)',
             'static bool join_until(Thread *thread, const char *name, u64 deadline)',
             'static void nro_shutdown(Thread *agent, bool started)',
         ])
         trailer = r'''
-static void worker(void *p) { (void)p;while(!sa_stopping())usleep(1000);atomic_fetch_add(&stopped,1); }
+static void worker(void *p) { if(p) { char b;assert(recv(blocked_pair[0],&b,1,0)<=0); } else while(!sa_stopping())usleep(1000);atomic_fetch_add(&stopped,1); }
 static void listener(void *p) {
     (void)p;
-    for(unsigned i=0;i<6;i++)assert(!sa_spawn(i,worker,NULL));
+    for(unsigned i=0;i<6;i++)assert(!sa_spawn(i,worker,i==0 ? blocked_pair : NULL));
     assert(!threadCreate(&log_thread,worker,NULL,NULL,0,0,0));
     assert(!threadStart(&log_thread));log_started=true;atomic_store(&ready,1);
     while(!sa_stopping())usleep(1000);
@@ -80,9 +83,12 @@ static void listener(void *p) {
 }
 int main(int argc,char **argv) {
     (void)argv; refuse=argc>1;
+    assert(!socketpair(AF_UNIX,SOCK_STREAM,0,blocked_pair));active_sockets[0]=blocked_pair[0]+1;
     Thread agent={0};assert(!threadCreate(&agent,listener,NULL,NULL,0,0,0));assert(!threadStart(&agent));
     while(!atomic_load(&ready))usleep(1000);
     nro_shutdown(&agent,true);
+    char byte;assert(read(blocked_pair[1],&byte,1)==0);close(blocked_pair[1]);
+    assert(!active_sockets[0]);
     assert(!refuse);assert(sa_stopping());
     assert(atomic_load(&stopped)==8);
     assert(atomic_load(&joins)==8 && atomic_load(&closes)==8);
