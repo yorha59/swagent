@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.26-rs"; }
+const char *sa_version(void) { return "swagent-1.27-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -45,12 +45,15 @@ void __appExit(void) {}
 extern void agent_main(void);
 #ifdef SA_NRO
 extern void agent_nro_main(void);
-static atomic_bool nro_listening;
+/* UI reads status; only the main thread touches the console. */
+static atomic_int nro_listener_status;
 static void nro_agent(void *arg) { (void)arg; agent_nro_main(); }
 int main(void) {
     /* Must be the first call: stdout uses the software console framebuffer.
      * Printing before consoleInit causes ConsoleSwRenderer_drawChar to abort. */
     consoleInit(NULL);
+    printf("SWAgent %s\n", sa_version());
+    consoleUpdate(NULL);
     /* SD is mounted by the standard libnx __appInit before main. */
     PadState pad;
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -58,18 +61,31 @@ int main(void) {
     Thread agent;
     Result rc = threadCreate(&agent, nro_agent, NULL, NULL, 0x18000, 44, -2);
     if (!rc) rc = threadStart(&agent);
-    if (rc) printf("agent startup failed: 0x%x\n", rc);
-    bool announced=false;
+    if (rc) {
+        printf("agent startup failed: 0x%x\npress PLUS to exit\n", rc);
+        consoleUpdate(NULL);
+    }
+    int announced=0;
     while (appletMainLoop() && !atomic_load(&nro_quit)) {
-        if (!announced && atomic_load(&nro_listening)) {
-            struct in_addr ip={.s_addr=gethostid()};
-            printf("%s listening %s:6000 (PLUS or quit to exit)\n", sa_version(), inet_ntoa(ip));
-            announced=true;
+        int status=atomic_load(&nro_listener_status);
+        if (status != announced) {
+            if (status == 1) {
+                struct in_addr ip={.s_addr=gethostid()};
+                printf("listening %s:6000\npress PLUS to exit\n", inet_ntoa(ip));
+                consoleUpdate(NULL);
+            } else if (status == -EADDRINUSE) {
+                printf("port 6000 busy - sysmodule already running\npress PLUS to exit\n");
+                consoleUpdate(NULL);
+            } else if (status < 0) {
+                printf("listener failed: errno=%d; retrying every 5s\npress PLUS to exit\n", -status);
+                consoleUpdate(NULL);
+            }
+            announced=status;
         }
         padUpdate(&pad);
         if (padGetButtonsDown(&pad) & HidNpadButton_Plus) break;
         consoleUpdate(NULL);
-        svcSleepThread(16000000);
+        svcSleepThread(100000000);
     }
     /* All service/socket/thread resources belong to this process. Terminate
      * together, including a worker potentially blocked in service IPC. */
@@ -204,7 +220,7 @@ void sa_timeout(int fd, int seconds) {
     setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t));
     setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&t,sizeof(t));
 }
-int sa_listen(void) {
+static int listen_socket(void) {
     sa_trace("listener-bind-start",0);
     int fd = socket(AF_INET,SOCK_STREAM,0); if (fd < 0) return -errno;
     int one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
@@ -215,10 +231,14 @@ int sa_listen(void) {
     /* Poll accept so worker connect failures can wake the recovery loop even
      * when no client is connected. Do not rely on accept honoring RCVTIMEO. */
     if (fcntl(fd,F_SETFL,O_NONBLOCK) < 0) { int e=errno; close(fd); return -e; }
-#ifdef SA_NRO
-    atomic_store(&nro_listening,true);
-#endif
     sa_trace("listener-bind",0); return fd;
+}
+int sa_listen(void) {
+    int result=listen_socket();
+#ifdef SA_NRO
+    atomic_store(&nro_listener_status,result < 0 ? result : 1);
+#endif
+    return result;
 }
 int sa_accept(int fd) {
     int client=accept(fd,NULL,NULL);

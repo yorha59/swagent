@@ -230,7 +230,9 @@ unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. After binding, the console
 prints `swagent-1.22-rs listening IP:6000 (PLUS or quit to exit)` with the LAN IP.
-The listener binds all interfaces. Stop the sysmodule first if it owns port 6000.
+The listener binds all interfaces. If the sysmodule owns port 6000, the NRO
+shows a busy message and retries every five seconds, taking over automatically
+when the port becomes available. PLUS exits while waiting.
 
 Bare TCP `quit` replies `quit: ok` and closes that client in both editions;
 in the NRO it also returns to hbmenu, as does PLUS. `quit <title-id>` retains
@@ -321,3 +323,8 @@ already had this order; regression checks now enforce it in the preprocessed
 NRO source and linked entry point. Printing before console initialization can
 crash in `ConsoleSwRenderer_drawChar` with a NULL framebuffer. The hbmenu
 console continues to display the LAN IP and port 6000.
+
+Version 1.27 (`swagent-1.27-rs`) displays a startup banner and refreshes the
+console after each status print and every 100ms while polling PLUS. Bind
+failures retry every five seconds; a busy port shows the sysmodule warning,
+and successful takeover displays the LAN IP and port.
