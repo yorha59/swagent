@@ -33,6 +33,8 @@ const PFS_ENTRY_SIZE: usize = 24;
 const NSP: &str = "sdmc:/switch/.install.tmp.nsp";
 const CNCA: &str = "sdmc:/switch/.install.tmp.cnmt.nca";
 const CHUNK: usize = 4 * 1024 * 1024;
+// Bound each completed IO block so even unusually large caller buffers renew regularly.
+const IO_BLOCK: usize = 64 * 1024 * 1024;
 const META_CAP: usize = 512 * 1024;
 pub struct Entry<'a> {
     pub name: &'a str,
@@ -77,6 +79,7 @@ impl Pfs {
             if e.off.checked_add(e.size).is_none_or(|end| end > size) {
                 return Err(Error("PFS0 entry outside file", 0));
             }
+            crate::budget::progress()?;
             for j in 0..i {
                 let prev = self.entry(j)?;
                 if prev.name.eq_ignore_ascii_case(e.name)
@@ -523,6 +526,8 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     if chunk.is_empty() {
         return Err(Error("empty install buffer", 0));
     }
+    let block_len = chunk.len().min(IO_BLOCK);
+    let chunk = &mut chunk[..block_len];
     let mut f = File::open(NSP, false)?;
     let p = Pfs::open(&mut f)?;
     for i in 0..p.count {
@@ -641,6 +646,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     own[16..20].copy_from_slice(&(cnca.size as u32).to_le_bytes());
     own[20] = (cnca.size >> 32) as u8;
     // Validate all files before modifying NCM.
+    let mut total = 0u64;
     for info in core::iter::once(&own[..]).chain(m.contents.chunks_exact(56).map(|c| &c[32..])) {
         if info[22] == 6 {
             continue;
@@ -650,6 +656,8 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
         if e.size != content_size(info)? {
             return Err(Error("NCA size mismatch", 0));
         }
+        total = total.checked_add(e.size).ok_or(Error("install size overflow", 0))?;
+        crate::budget::progress()?;
     }
     rc(
         unsafe {
@@ -678,6 +686,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     )?;
     let mut db = Database(db);
     crate::log::add("install: writing contents");
+    let mut writing = WriteProgress::new(total);
     for info in core::iter::once(&own[..]).chain(m.contents.chunks_exact(56).map(|c| &c[32..])) {
         if info[22] == 6 {
             continue;
@@ -693,6 +702,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
             "NCM Has",
         )?;
         if present {
+            writing.advance(e.size)?;
             continue;
         }
         let mut ph = [0; 16];
@@ -744,7 +754,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
                 },
                 "write placeholder",
             )?;
-            crate::budget::progress()?;
+            writing.advance(n as u64)?;
             off += n as u64;
         }
         rc(
@@ -754,6 +764,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
             },
             "register content",
         )?;
+        crate::budget::progress()?;
     }
     let count = 1 + m.contents.chunks_exact(56).filter(|c| c[54] != 6).count();
     let size = 8 + m.ext.len() + count * 24 + m.metas.len() + m.extended;
@@ -816,4 +827,33 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     )?;
     records(m.key, storage)?;
     Ok(m.key.id)
+}
+
+// Completed NCA writes (and confirmed existing contents) drive both liveness
+// and aggregate progress. Emit every crossed threshold, including small NCAs.
+struct WriteProgress {
+    total: u64,
+    done: u64,
+    next: u64,
+}
+impl WriteProgress {
+    fn new(total: u64) -> Self {
+        crate::log::add("install: writing contents pct=0");
+        Self { total, done: 0, next: 5 }
+    }
+    fn advance(&mut self, bytes: u64) -> Result {
+        crate::budget::progress()?;
+        self.done = self.done.saturating_add(bytes).min(self.total);
+        let pct = if self.total == 0 { 100 } else {
+            (self.done as u128 * 100 / self.total as u128) as u64
+        };
+        while self.next <= pct && self.next <= 100 {
+            use core::fmt::Write;
+            let mut line = Text::<80>::new();
+            let _ = write!(line, "install: writing contents pct={}", self.next);
+            crate::log::add(line.str());
+            self.next += 5;
+        }
+        Ok(())
+    }
 }

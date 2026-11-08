@@ -65,7 +65,11 @@ uint32_t sa_open(const char *p,int write,Service *s){char out[1024];path(p,out);
 uint32_t sa_remove(const char *p){char out[1024];path(p,out);return unlink(out)?errno:0;}
 void fsFileClose(Service *s){close(s->fd);}
 uint32_t fsFileRead(Service *s,int64_t off,uint8_t *p,uint64_t n,uint32_t opt,uint64_t *out){(void)opt;ssize_t r=pread(s->fd,p,n,off);if(r<0)return errno;*out=r;return 0;}
-uint32_t fsFileWrite(Service *s,int64_t off,const uint8_t *p,uint64_t n,uint32_t opt){(void)opt;return pwrite(s->fd,p,n,off)==(ssize_t)n?0:errno;}
+static _Thread_local uint64_t install_write_step, install_write_elapsed;
+void host_install_write_step(uint64_t ms){install_write_step=ms;install_write_elapsed=0;}
+static void install_written(void){if(install_write_step){install_write_elapsed+=install_write_step;host_clock_offset(install_write_elapsed);}}
+uint64_t host_install_write_elapsed(void){return install_write_elapsed;}
+uint32_t fsFileWrite(Service *s,int64_t off,const uint8_t *p,uint64_t n,uint32_t opt){(void)opt;if(pwrite(s->fd,p,n,off)!=(ssize_t)n)return errno;install_written();return 0;}
 uint32_t fsFileFlush(Service *s){return fsync(s->fd)?errno:0;}
 uint32_t fsFileGetSize(Service *s,int64_t *n){struct stat st;if(fstat(s->fd,&st))return errno;*n=st.st_size;return 0;}
 void fsFsClose(Service *s){(void)s;}
@@ -92,7 +96,7 @@ void ncmContentStorageClose(Service *s){(void)s;}void ncmContentMetaDatabaseClos
 uint32_t ncmContentStorageHas(Service *s,_Bool *out,const void *id){(void)s;(void)id;*out=0;return 0;}
 uint32_t ncmContentStorageGeneratePlaceHolderId(Service *s,void *id){(void)s;memset(id,1,16);return 0;}
 uint32_t ncmContentStorageCreatePlaceHolder(Service *s,const void *id,const void *ph,int64_t size){(void)s;(void)id;(void)ph;(void)size;return 0;}
-uint32_t ncmContentStorageWritePlaceHolder(Service *s,const void *ph,uint64_t off,const void *p,size_t n){(void)s;(void)ph;(void)off;(void)p;if(n>max_write)max_write=n;return fail_write;}
+uint32_t ncmContentStorageWritePlaceHolder(Service *s,const void *ph,uint64_t off,const void *p,size_t n){(void)s;(void)ph;(void)off;(void)p;if(n>max_write)max_write=n;if(!fail_write)install_written();return fail_write;}
 uint32_t ncmContentStorageRegister(Service *s,const void *id,const void *ph){(void)s;(void)id;(void)ph;registered++;return 0;}
 uint32_t ncmContentStorageDeletePlaceHolder(Service *s,const void *ph){(void)s;(void)ph;deleted++;return 0;}
 uint32_t ncmContentMetaDatabaseSet(Service *s,const void *key,const void *p,uint64_t n){(void)s;(void)key;if(n<8||((const uint8_t*)p)[2]!=2)return 999;return 0;}
@@ -196,7 +200,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.24-rs"; }
+const char *sa_version(void) { return "swagent-1.25-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }

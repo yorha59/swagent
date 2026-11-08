@@ -304,3 +304,12 @@ Budget extensions emit a `debug: budget extended` log at most once per minute.
 `put PATH SIZE` accepts up to 4 MiB, including binary NRO payloads. The wire
 receiver retains its existing 512-byte streaming buffers and does not allocate a
 second large buffer. `cat` retains its 256 KiB limit and the heap remains 16 MiB.
+
+
+swagent-1.25-rs keeps the 1.24 download retry, reconnect and Range behavior.
+Completed install writes, NCA registration and PFS/MD5 validation renew the
+same 30-second progress deadline; install IO blocks are capped at 64 MiB.
+Content writing logs `install: writing contents pct=N` at every 5% threshold
+(including confirmed contents already present). Host regression coverage runs
+the disk installer with simulated 200 ms writes for over ten grace windows,
+and verifies a stalled write still expires.
