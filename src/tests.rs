@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.25-rs sys\r\n"),
+        ("version", "swagent-1.26-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1742,7 +1742,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.25-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.26-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1757,7 +1757,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.25-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.26-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {

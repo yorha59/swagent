@@ -28,7 +28,7 @@ symbols = subprocess.check_output([nm, root/'build/swagent.elf'], text=True)
 assert re.search(r' T agent_main$', symbols, re.M)
 assert not re.search(r' T (?:_exit|exit|abort)$', symbols, re.M)
 assert not re.search(r'\b(?:sa_(?:hid_init|buttons|touch|capture|jpeg\w*)|hiddbg\w*|capssc\w*|tj\w*)$', symbols, re.M)
-assert b'swagent-1.25-rs' in elf
+assert b'swagent-1.26-rs' in elf
 assert (root/'build/swagent.nsp').read_bytes() == p
 assert (artifact.parent/'flags/boot2.flag').exists()
 print(f'NSP: PFS0 + NSO + NPDM title ID + AArch64 ELF verified; {len(p):,} bytes')
@@ -39,18 +39,24 @@ if '--sysmodule-only' in sys.argv:
 
 nro = (root/'dist/switch/swagent.nro').read_bytes()
 assert nro[0x10:0x14] == b'NRO0'
-assert struct.unpack_from('<I', nro, 0x18)[0] == len(nro)
+nro_size = struct.unpack_from('<I', nro, 0x18)[0]
+assert nro_size <= len(nro)
+if nro_size < len(nro):
+    assert nro[nro_size:nro_size+4] == b'ASET'
+    for i in range(3):
+        offset, size = struct.unpack_from('<QQ', nro, nro_size+8+i*16)
+        assert nro_size+offset+size <= len(nro)
 segments = [struct.unpack_from('<II', nro, 0x20+i*8) for i in range(3)]
 assert segments[0][0] == 0
 assert all(off % 4096 == size % 4096 == 0 for off, size in segments)
 assert all(segments[i][0]+segments[i][1] == segments[i+1][0] for i in range(2))
-assert sum(size for off, size in segments) == len(nro)
+assert sum(size for off, size in segments) == nro_size
 mod, = struct.unpack_from('<I', nro, 4)
 assert nro[mod:mod+4] == b'MOD0'
 _, bss_start, bss_end = struct.unpack_from('<III', nro, mod+4)
-assert len(nro) <= mod+bss_end <= len(nro)+struct.unpack_from('<I', nro, 0x38)[0]
+assert nro_size <= mod+bss_end <= nro_size+struct.unpack_from('<I', nro, 0x38)[0]
 assert mod+bss_start <= mod+bss_end
-assert b'swagent-1.25-rs' in nro and b'listening %s:6000' in nro
+assert b'swagent-1.26-rs' in nro and b'listening %s:6000' in nro
 print(f'NRO: NRO0 + page segments + MOD0/BSS verified; {len(nro):,} bytes')
 
 # Verify hbmenu uses libnx crt0/default runtime rather than resident overrides.
@@ -67,7 +73,12 @@ def disassemble(symbol):
 init = disassemble('sa_init')
 assert not any(name in init for name in ('smInitialize', 'fsInitialize', 'setsysInitialize', 'log_writer'))
 main = disassemble('main')
+calls = re.findall(r'\bbl\s+[0-9a-f]+\s+<([^>]+)>', main)
+assert calls[0] == 'consoleInit', calls
 assert main.index('<consoleInit>') < main.index('<threadStart>')
+for output in ('printf', 'puts', 'vfprintf', 'fwrite', 'write'):
+    if '<'+output+'>' in main:
+        assert main.index('<consoleInit>') < main.index('<'+output+'>')
 assert '<svcExitProcess>' not in main
 assert '<sleep_guard' not in disassemble('agent_nro_main')
 assert re.search(r' T __libnx_initheap$', symbols, re.M)

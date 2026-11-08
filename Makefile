@@ -1,3 +1,4 @@
+VERSION := 1.26
 DEVKITPRO ?= $(HOME)/devkitpro
 export DEVKITPRO
 CARGO := $(HOME)/.cargo/bin/cargo
@@ -46,6 +47,7 @@ check: all nro
 	RUSTFLAGS="-C link-arg=$(CURDIR)/build/host.o -A dead_code" $(CARGO) test --target aarch64-apple-darwin
 	python3 tests/check_artifact.py
 	python3 tests/test_nro_packer.py
+	python3 tests/test_nro_entry.py
 clean:
 	rm -rf build dist
 	$(CARGO) clean
