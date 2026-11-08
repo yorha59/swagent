@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.27-rs"; }
+const char *sa_version(void) { return "swagent-1.28-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -28,8 +28,10 @@ int sa_is_nro(void) {
 #include <stdatomic.h>
 static atomic_bool nro_quit;
 void sa_quit(void) { atomic_store(&nro_quit, true); }
+int sa_stopping(void) { return atomic_load(&nro_quit); }
 #else
 void sa_quit(void) {}
+int sa_stopping(void) { return 0; }
 #endif
 #ifndef SA_NRO
 /* Resident heap only. hbmenu supplies its heap through the loader ABI. */
@@ -47,7 +49,8 @@ extern void agent_main(void);
 extern void agent_nro_main(void);
 /* UI reads status; only the main thread touches the console. */
 static atomic_int nro_listener_status;
-static void nro_agent(void *arg) { (void)arg; agent_nro_main(); }
+static void nro_agent(void *arg) { (void)arg; agent_nro_main(); sa_quit(); }
+static void nro_shutdown(Thread *agent, bool started);
 int main(void) {
     /* Must be the first call: stdout uses the software console framebuffer.
      * Printing before consoleInit causes ConsoleSwRenderer_drawChar to abort. */
@@ -60,7 +63,8 @@ int main(void) {
     padInitializeDefault(&pad);
     Thread agent;
     Result rc = threadCreate(&agent, nro_agent, NULL, NULL, 0x18000, 44, -2);
-    if (!rc) rc = threadStart(&agent);
+    if (!rc) { rc = threadStart(&agent); if (rc) threadClose(&agent); }
+    bool agent_started = !rc;
     if (rc) {
         printf("agent startup failed: 0x%x\npress PLUS to exit\n", rc);
         consoleUpdate(NULL);
@@ -87,8 +91,7 @@ int main(void) {
         consoleUpdate(NULL);
         svcSleepThread(100000000);
     }
-    /* All service/socket/thread resources belong to this process. Terminate
-     * together, including a worker potentially blocked in service IPC. */
+    nro_shutdown(&agent, agent_started);
     consoleExit(NULL);
     /* Return through libnx to hbmenu; do not kill the loader process. */
     return 0;
@@ -103,6 +106,7 @@ static atomic_flag log_lock=ATOMIC_FLAG_INIT;
 static char log_queue[128][768], log_tail[16384];
 static size_t log_head, log_count, log_tail_len;
 static Thread log_thread;
+static bool log_started;
 u64 sa_now_ms(void);
 void sa_persist(const char *p, size_t n) {
     if (atomic_flag_test_and_set(&log_lock)) return;
@@ -144,7 +148,7 @@ static void log_writer(void *arg) {
             if(log_count) { memcpy(line,log_queue[log_head],sizeof(line)); log_head=(log_head+1)%128; log_count--; }
             atomic_flag_clear(&log_lock);
         }
-        if(!line[0]) { svcSleepThread(10000000); continue; }
+        if(!line[0]) { if (sa_stopping()) return; svcSleepThread(10000000); continue; }
         FILE *f=fopen("sdmc:/switch/swagent.log","ab+");
         if(!f) continue;
         fseek(f,0,SEEK_END); long size=ftell(f);
@@ -165,13 +169,30 @@ static void sa_trace(const char *step,int rc) {
 static Semaphore jobs_ready;
 void sa_jobs_init(void) { semaphoreInit(&jobs_ready, 0); }
 void sa_jobs_signal(void) { semaphoreSignal(&jobs_ready); }
-void sa_jobs_wait(void) { semaphoreWait(&jobs_ready); }
+void sa_jobs_wait(void) {
+#ifdef SA_NRO
+    while (!sa_stopping() && !semaphoreTryWait(&jobs_ready)) svcSleepThread(10000000);
+#else
+    semaphoreWait(&jobs_ready);
+#endif
+}
 static Thread threads[6];
+static bool thread_started[6];
+static Mutex listener_lock;
+static int listener_fd=-1;
+void sa_listener_close(int fd) {
+    mutexLock(&listener_lock);
+    if (listener_fd==fd) listener_fd=-1;
+    close(fd);
+    mutexUnlock(&listener_lock);
+}
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
     if (slot >= 6) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    if (sa_stopping()) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
     sa_trace("thread-spawn-start",0);
     Result rc = threadCreate(&threads[slot], fn, arg, NULL, 0x18000, 44, -2);
     if (!rc) { rc = threadStart(&threads[slot]); if (rc) threadClose(&threads[slot]); }
+    if (!rc) thread_started[slot]=true;
     char step[40]; snprintf(step,sizeof(step),"thread-%u",slot); sa_trace(step,rc);
     return rc;
 }
@@ -193,6 +214,10 @@ u32 sa_net_reinit(void) {
 u32 sa_init(void) {
 #ifdef SA_NRO
     /* libnx already initialized SM/FS and mounted SD. No resident recovery. */
+    if (sa_stopping()) return 1;
+    Result lr=threadCreate(&log_thread,log_writer,NULL,NULL,0x10000,44,-2);
+    if (!lr) { lr=threadStart(&log_thread); if(lr)threadClose(&log_thread); }
+    log_started=!lr;
     return sa_net_init();
 #else
     static bool sm_ok, fs_ok, sd_ok;
@@ -206,7 +231,8 @@ u32 sa_init(void) {
     if (!fs_ok) { sa_trace("fs-init-start",0); rc=fsInitialize(); sa_trace("fs-init",rc); if(rc) return rc; fs_ok=true; }
     if (!sd_ok) { sa_trace("fs-mount-start",0); rc=fsdevMountSdmc(); sa_trace("fs-mount",rc); if(rc) return rc; sd_ok=true;
         Result lr=threadCreate(&log_thread,log_writer,NULL,NULL,0x10000,44,-2);
-        if(!lr)lr=threadStart(&log_thread);
+        if(!lr) { lr=threadStart(&log_thread); if(lr)threadClose(&log_thread); }
+        log_started=!lr;
         sa_trace("log-thread",lr);
     }
     sa_trace("bsd-init-start",0); rc=sa_net_init(); sa_trace("bsd-init",rc); return rc;
@@ -234,7 +260,10 @@ static int listen_socket(void) {
     sa_trace("listener-bind",0); return fd;
 }
 int sa_listen(void) {
-    int result=listen_socket();
+    mutexLock(&listener_lock);
+    int result=sa_stopping() ? -ECANCELED : listen_socket();
+    if (result>=0) listener_fd=result;
+    mutexUnlock(&listener_lock);
 #ifdef SA_NRO
     atomic_store(&nro_listener_status,result < 0 ? result : 1);
 #endif
@@ -637,3 +666,41 @@ u32 sa_installed_delete(u64 title) {
     Result rc=nsInitialize(); if(rc)return rc;
     rc=nsDeleteApplicationCompletely(title); nsExit(); return rc;
 }
+
+#ifdef SA_NRO
+/* A signaled kernel thread handle is required before releasing its stack/TLS.
+ * One shared deadline bounds shutdown; a failed join must never reach hbloader. */
+static bool join_until(Thread *thread, const char *name, u64 deadline) {
+    u64 now=sa_now_ms();
+    Result rc=waitSingleHandle(thread->handle, (deadline>now ? deadline-now : 0)*1000000ULL);
+    if (!rc) rc=threadWaitForExit(thread);
+    if (!rc) rc=threadClose(thread);
+    if (rc) {
+        char line[128]; snprintf(line,sizeof(line),"shutdown: %s join failed rc=0x%x; keeping NRO mapped",name,rc);
+        sa_persist(line,strlen(line));
+        printf("%s\n",line);
+        consoleUpdate(NULL);
+    }
+    return !rc;
+}
+static void nro_shutdown(Thread *agent, bool started) {
+    sa_quit();
+    u64 deadline=sa_now_ms()+3000;
+    mutexLock(&listener_lock);
+    if (listener_fd>=0) shutdown(listener_fd,SHUT_RDWR);
+    mutexUnlock(&listener_lock);
+    /* The job semaphore is initialized by the listener lane. Its bounded wait
+     * observes shutdown even if exit raced with initialization. */
+    bool ok=true;
+    if (started) ok=join_until(agent,"listener",deadline);
+    /* Joining listener first establishes visibility of every spawn record. */
+    if (ok) {
+        for (unsigned i=0;i<6;i++) if (thread_started[i]) {
+            char name[32]; snprintf(name,sizeof(name),"worker-%u",i);
+            if (!join_until(&threads[i],name,deadline)) ok=false;
+        }
+        if (log_started && !join_until(&log_thread,"logger",deadline)) ok=false;
+    }
+    if (!ok) for (;;) { consoleUpdate(NULL); svcSleepThread(100000000); }
+}
+#endif

@@ -36,20 +36,22 @@ pub extern "C" fn agent_main() -> ! {
         util::sleep(5000);
     }
     sleep_guard::recover();
-    start_listener()
+    start_listener();
+    util::forever()
 }
 #[cfg(not(test))]
 #[no_mangle]
-pub extern "C" fn agent_nro_main() -> ! {
+pub extern "C" fn agent_nro_main() {
     // C main has initialized the console; libnx has mounted SD.
-    if unsafe { ffi::sa_init() } != 0 { util::forever(); }
+    if unsafe { ffi::sa_init() } != 0 { return; }
     start_listener()
 }
 #[cfg(not(test))]
-fn start_listener() -> ! {
+fn start_listener() {
     log::add(version());
     unsafe { ffi::sa_jobs_init(); }
     loop {
+        if stopping() { return; }
         let code = unsafe { ffi::sa_spawn(0, protocol::worker, core::ptr::null_mut()) };
         if code == 0 {
             break;
@@ -59,6 +61,7 @@ fn start_listener() -> ! {
     }
     for slot in 0..4 {
         loop {
+            if stopping() { return; }
             let code = unsafe {
                 ffi::sa_spawn(
                     slot + 1,
@@ -74,6 +77,7 @@ fn start_listener() -> ! {
         }
     }
     loop {
+        if stopping() { return; }
         let code = unsafe { ffi::sa_spawn(5, protocol::watchdog, core::ptr::null_mut()) };
         if code == 0 {
             break;
@@ -97,3 +101,5 @@ pub fn version() -> &'static str {
     unsafe { core::ffi::CStr::from_ptr(ffi::sa_version()).to_str().unwrap_or("unknown") }
 }
 pub fn is_nro() -> bool { unsafe { ffi::sa_is_nro() != 0 } }
+
+pub fn stopping() -> bool { unsafe { ffi::sa_stopping() != 0 } }

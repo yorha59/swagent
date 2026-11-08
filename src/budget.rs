@@ -25,6 +25,7 @@ fn owned() -> bool {
     OWNER.load(Acquire) == unsafe { ffi::sa_thread_id() }
 }
 pub fn check() -> Result {
+    if crate::stopping() { return Err(Error("shutdown", 125)); }
     if owned() && expired() {
         Err(Error("operation wall-clock budget", 110))
     } else {
