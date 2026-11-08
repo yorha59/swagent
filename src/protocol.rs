@@ -511,6 +511,7 @@ fn execute_inner(job: Job) {
                 reply(id, line.bytes())?;
             }
             "install" => {
+                log::add(job.line.str());
                 let url = words
                     .next()
                     .ok_or(Error("usage: install URL [sd|nand] [md5=HEX]", 0))?;
@@ -539,21 +540,7 @@ fn execute_inner(job: Job) {
                 log::add(s.str());
                 reply(id, s.bytes())?;
             }
-            "log" => {
-                let n = match words.next() {
-                    Some(s) => s
-                        .parse::<usize>()
-                        .map_err(|_| Error("invalid log count", 0))?,
-                    None => 100,
-                };
-                if words.next().is_some() {
-                    return Err(Error("too many arguments", 0));
-                }
-                log::dump(n, |p| {
-                    let _ = reply(id, p);
-                });
-                reply(id, b"log: end")?;
-            }
+            "installed" => crate::installed::run(job.line.str(), &mut |line| reply(id,line))?,
             _ => {
                 reply(id, b"error: unknown command")?;
             }
@@ -699,6 +686,19 @@ pub(crate) fn format_status(phase: u8, rx: u64, total: u64) -> Text<128> {
 fn receive(id: u64, line: Text<512>) {
     let mut words = line.str().split_ascii_whitespace();
     match words.next() {
+        Some("log") => {
+            let count=words.next().unwrap_or("100").parse::<usize>();
+            match count {
+                Ok(n) if words.next().is_none() => {
+                    let _=reply(id,b"log: ring");
+                    log::dump(n,|p| { let _=reply(id,p); });
+                    let _=reply(id,b"log: file /switch/swagent.log tail");
+                    log::file_tail(|p| { let _=reply(id,p); });
+                    let _=reply(id,b"log: end");
+                }
+                _ => { let _=reply(id,b"log: error invalid arguments rc=0"); }
+            }
+        }
         Some("ping") if words.next().is_none() => {
             let _ = reply(id, b"pong");
         }

@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.18-rs"; }
+const char *sa_version(void) { return "swagent-1.19-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -72,11 +72,79 @@ int main(void) {
 #else
 int main(void) { agent_main(); for (;;) svcSleepThread(3600000000000LL); }
 #endif
+/* Producers never wait for SD or another producer. One writer flushes each line.
+ * The tail is a snapshot of bytes actually read/written, including prior boots. */
+#include <stdatomic.h>
+static atomic_flag log_lock=ATOMIC_FLAG_INIT;
+static char log_queue[128][768], log_tail[16384];
+static size_t log_head, log_count, log_tail_len;
+static Thread log_thread;
+u64 sa_now_ms(void);
+void sa_persist(const char *p, size_t n) {
+    if (atomic_flag_test_and_set(&log_lock)) return;
+    if (log_count<128) {
+        size_t slot=(log_head+log_count)%128;
+        if(n>766)n=766;
+        memcpy(log_queue[slot],p,n); log_queue[slot][n]='\n'; log_queue[slot][n+1]=0; log_count++;
+    }
+    atomic_flag_clear(&log_lock);
+}
+size_t sa_log_tail(char *p,size_t n) {
+    if(atomic_flag_test_and_set(&log_lock)) return 0;
+    if(n>log_tail_len)n=log_tail_len;
+    memcpy(p,log_tail+log_tail_len-n,n);
+    atomic_flag_clear(&log_lock); return n;
+}
+static void log_cache(const char *p,size_t n) {
+    if(atomic_flag_test_and_set(&log_lock)) return;
+    if(n>sizeof(log_tail)) { p+=n-sizeof(log_tail); n=sizeof(log_tail); }
+    if(log_tail_len+n>sizeof(log_tail)) {
+        size_t drop=log_tail_len+n-sizeof(log_tail);
+        memmove(log_tail,log_tail+drop,log_tail_len-drop); log_tail_len-=drop;
+    }
+    memcpy(log_tail+log_tail_len,p,n); log_tail_len+=n;
+    atomic_flag_clear(&log_lock);
+}
+static void log_writer(void *arg) {
+    (void)arg;
+    mkdir("sdmc:/switch",0777);
+    FILE *old=fopen("sdmc:/switch/swagent.log","rb");
+    if(old) {
+        char bytes[16384]; fseek(old,0,SEEK_END); long size=ftell(old);
+        if(size>0) { fseek(old,size>16384?size-16384:0,SEEK_SET); size_t n=fread(bytes,1,sizeof(bytes),old); log_cache(bytes,n); }
+        fclose(old);
+    }
+    for(;;) {
+        char line[768]={0};
+        if(!atomic_flag_test_and_set(&log_lock)) {
+            if(log_count) { memcpy(line,log_queue[log_head],sizeof(line)); log_head=(log_head+1)%128; log_count--; }
+            atomic_flag_clear(&log_lock);
+        }
+        if(!line[0]) { svcSleepThread(10000000); continue; }
+        FILE *f=fopen("sdmc:/switch/swagent.log","ab+");
+        if(!f) continue;
+        fseek(f,0,SEEK_END); long size=ftell(f);
+        if(size>256*1024) {
+            fclose(f); f=fopen("sdmc:/switch/swagent.log","wb");
+            if(!f)continue;
+            if(!atomic_flag_test_and_set(&log_lock)) { log_tail_len=0; atomic_flag_clear(&log_lock); }
+        }
+        size_t n=strlen(line);
+        if(fwrite(line,1,n,f)==n && fflush(f)==0) log_cache(line,n);
+        fclose(f);
+    }
+}
+static void sa_trace(const char *step,int rc) {
+    char line[192]; snprintf(line,sizeof(line),"boot uptime_ms=%llu step=%s %s rc=%d",(unsigned long long)sa_now_ms(),step,rc?"fail":"ok",rc);
+    sa_persist(line,strlen(line));
+}
 static Thread threads[6];
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
     if (slot >= 6) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    sa_trace("thread-spawn-start",0);
     Result rc = threadCreate(&threads[slot], fn, arg, NULL, 0x18000, 44, -2);
     if (!rc) { rc = threadStart(&threads[slot]); if (rc) threadClose(&threads[slot]); }
+    char step[40]; snprintf(step,sizeof(step),"thread-%u",slot); sa_trace(step,rc);
     return rc;
 }
 static bool socket_ok;
@@ -97,15 +165,19 @@ u32 sa_net_reinit(void) {
 u32 sa_init(void) {
     static bool sm_ok, fs_ok, sd_ok;
     Result rc;
-    if (!sm_ok) { rc=smInitialize(); if(rc) return rc; sm_ok=true; }
+    if (!sm_ok) { rc=smInitialize(); sa_trace("sm-init",rc); if(rc) return rc; sm_ok=true; }
     if (!hosversionGet() && !setsysInitialize()) {
         SetSysFirmwareVersion fw;
         if (!setsysGetFirmwareVersion(&fw)) hosversionSet(MAKEHOSVERSION(fw.major,fw.minor,fw.micro));
         setsysExit();
     }
-    if (!fs_ok) { rc=fsInitialize(); if(rc) return rc; fs_ok=true; }
-    if (!sd_ok) { rc=fsdevMountSdmc(); if(rc) return rc; sd_ok=true; }
-    return sa_net_init();
+    if (!fs_ok) { sa_trace("fs-init-start",0); rc=fsInitialize(); sa_trace("fs-init",rc); if(rc) return rc; fs_ok=true; }
+    if (!sd_ok) { sa_trace("fs-mount-start",0); rc=fsdevMountSdmc(); sa_trace("fs-mount",rc); if(rc) return rc; sd_ok=true;
+        Result lr=threadCreate(&log_thread,log_writer,NULL,NULL,0x10000,44,-2);
+        if(!lr)lr=threadStart(&log_thread);
+        sa_trace("log-thread",lr);
+    }
+    sa_trace("bsd-init-start",0); rc=sa_net_init(); sa_trace("bsd-init",rc); return rc;
 }
 ssize_t sa_send(int fd, const void *p, size_t n, int flags) { return send(fd,p,n,flags); }
 ssize_t sa_recv(int fd, void *p, size_t n, int flags) { return recv(fd,p,n,flags); }
@@ -116,11 +188,12 @@ void sa_timeout(int fd, int seconds) {
     setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&t,sizeof(t));
 }
 int sa_listen(void) {
+    sa_trace("listener-bind-start",0);
     int fd = socket(AF_INET,SOCK_STREAM,0); if (fd < 0) return -errno;
     int one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
     struct sockaddr_in a = {.sin_family=AF_INET,.sin_port=htons(6000),.sin_addr={INADDR_ANY}};
     if (bind(fd,(void*)&a,sizeof(a)) < 0 || listen(fd,4) < 0) {
-        int e=errno; close(fd); return -e;
+        int e=errno; sa_trace("listener-bind",-e); close(fd); return -e;
     }
     /* Poll accept so worker connect failures can wake the recovery loop even
      * when no client is connected. Do not rely on accept honoring RCVTIMEO. */
@@ -131,7 +204,7 @@ int sa_listen(void) {
         printf("TCP listener bound %s:%u\n", inet_ntoa(bound.sin_addr), ntohs(bound.sin_port));
         fflush(stdout);
     }
-    return fd;
+    sa_trace("listener-bind",0); return fd;
 }
 int sa_accept(int fd) {
     int client=accept(fd,NULL,NULL);
@@ -142,15 +215,24 @@ int sa_accept(int fd) {
 }
 int sa_connect(const char *host, const char *port) {
     struct addrinfo hint = {.ai_family=AF_INET,.ai_socktype=SOCK_STREAM}, *list=NULL;
-    if (getaddrinfo(host,port,&hint,&list)) { errno=EHOSTUNREACH; return -1; }
-    int saved=EHOSTUNREACH;
+    if (getaddrinfo(host,port,&hint,&list)) { sa_persist("connect DNS fail rc=-1 errno=113",strlen("connect DNS fail rc=-1 errno=113")); errno=EHOSTUNREACH; return -1; }
+    int saved=EHOSTUNREACH; unsigned attempt=0;
     int fd=-1;
     for (struct addrinfo *p=list;p;p=p->ai_next) {
+        char trace[256], ip[INET_ADDRSTRLEN];
+        struct sockaddr_in *dest=(struct sockaddr_in*)p->ai_addr;
+        inet_ntop(AF_INET,&dest->sin_addr,ip,sizeof(ip));
+        snprintf(trace,sizeof(trace),"connect retry attempt=%u destination=%s:%u",++attempt,ip,ntohs(dest->sin_port)); sa_persist(trace,strlen(trace));
         fd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
+        int socket_errno=fd<0?errno:0;
+        snprintf(trace,sizeof(trace),"socket create rc=%d errno=%d",fd,socket_errno); sa_persist(trace,strlen(trace));
         if (fd<0) { saved=errno; continue; }
         sa_timeout(fd,10);
-        if (!connect(fd,p->ai_addr,p->ai_addrlen)) break;
-        saved=errno; close(fd); fd=-1;
+        snprintf(trace,sizeof(trace),"connect start destination=%s:%u",ip,ntohs(dest->sin_port)); sa_persist(trace,strlen(trace));
+        int cr=connect(fd,p->ai_addr,p->ai_addrlen); int ce=cr?errno:0;
+        snprintf(trace,sizeof(trace),"connect rc=%d errno=%d destination=%s:%u",cr,ce,ip,ntohs(dest->sin_port)); sa_persist(trace,strlen(trace));
+        if (!cr) break;
+        saved=ce; close(fd); fd=-1;
     }
     freeaddrinfo(list); if (fd<0) errno=saved; return fd;
 }
@@ -489,3 +571,31 @@ u64 sa_now_ms(void) { return armTicksToNs(armGetSystemTick()) / 1000000; }
 u64 sa_thread_id(void) { u64 id=0; svcGetThreadId(&id,CUR_THREAD_HANDLE); return id; }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
+
+/* nsInitialize selects ns:am2 on modern firmware; AM provides records and
+ * deletion without an applet proxy, including records lacking control data. */
+u32 sa_installed(s32 offset,u64 *title,char *name,size_t capacity,s32 *count) {
+    sa_persist("installed: ns init start",24);
+    Result rc=nsInitialize(); if(rc)return rc;
+    NsApplicationRecord record={0};
+    rc=nsListApplicationRecord(&record,1,offset,count);
+    if(!rc && *count) {
+        *title=record.application_id;
+        name[0]=0;
+        NsApplicationControlData *data=calloc(1,sizeof(*data));
+        if(data) {
+            u64 actual=0;
+            if(!nsGetApplicationControlData(NsApplicationControlSource_Storage,*title,data,sizeof(*data),&actual)) {
+                for(unsigned i=0;i<16;i++) if(data->nacp.lang[i].name[0]) {
+                    snprintf(name,capacity,"%.*s",(int)sizeof(data->nacp.lang[i].name),data->nacp.lang[i].name); break;
+                }
+            }
+            free(data);
+        }
+    }
+    nsExit(); return rc;
+}
+u32 sa_installed_delete(u64 title) {
+    Result rc=nsInitialize(); if(rc)return rc;
+    rc=nsDeleteApplicationCompletely(title); nsExit(); return rc;
+}

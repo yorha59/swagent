@@ -186,9 +186,14 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.18-rs"; }
+const char *sa_version(void) { return "swagent-1.19-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
 int sa_is_nro(void) { return host_nro; }
 void sa_quit(void) { host_quit=1; }
+
+void sa_persist(const uint8_t *p,size_t n){(void)p;(void)n;}
+size_t sa_log_tail(uint8_t *p,size_t n){const char *s="previous boot evidence\n";size_t len=strlen(s);if(n<len)return 0;memcpy(p,s,len);return len;}
+uint32_t sa_installed(int32_t offset,uint64_t *title,uint8_t *name,size_t capacity,int32_t *count){(void)capacity;*count=offset==0;if(*count){*title=0x430000000000000bULL;memcpy(name,"stale swagent",14);}return 0;}
+uint32_t sa_installed_delete(uint64_t title){(void)title;return 0;}

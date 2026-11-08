@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), no_std)]
+mod installed;
 mod budget;
 mod ffi;
 mod files;
@@ -24,6 +25,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 #[cfg(not(test))]
 #[no_mangle]
 pub extern "C" fn agent_main() -> ! {
+    log::add(log::boot_line(util::now_ms()).str());
     if unsafe { ffi::sa_is_nro() } == 0 { util::sleep(5000); }
     loop {
         let code = unsafe { ffi::sa_init() };
