@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.17-rs"; }
+const char *sa_version(void) { return "swagent-1.18-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -129,10 +129,6 @@ int sa_listen(void) {
     socklen_t bound_len = sizeof(bound);
     if (getsockname(fd, (struct sockaddr *)&bound, &bound_len) == 0) {
         printf("TCP listener bound %s:%u\n", inet_ntoa(bound.sin_addr), ntohs(bound.sin_port));
-#ifdef SA_NRO
-        struct in_addr local = {.s_addr = gethostid()};
-        printf("Console IP: %s (listener accepts all interfaces)\n", inet_ntoa(local));
-#endif
         fflush(stdout);
     }
     return fd;
@@ -147,31 +143,14 @@ int sa_accept(int fd) {
 int sa_connect(const char *host, const char *port) {
     struct addrinfo hint = {.ai_family=AF_INET,.ai_socktype=SOCK_STREAM}, *list=NULL;
     if (getaddrinfo(host,port,&hint,&list)) { errno=EHOSTUNREACH; return -1; }
-    int saved=EHOSTUNREACH, fd=-1;
-    u64 deadline=armGetSystemTick()+armNsToTicks(10000000000ULL);
-    for (struct addrinfo *p=list;p && armGetSystemTick()<deadline;p=p->ai_next) {
+    int saved=EHOSTUNREACH;
+    int fd=-1;
+    for (struct addrinfo *p=list;p;p=p->ai_next) {
         fd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
         if (fd<0) { saved=errno; continue; }
-        if (fcntl(fd,F_SETFL,O_NONBLOCK)<0) { saved=errno; close(fd); fd=-1; break; }
-        int result=connect(fd,p->ai_addr,p->ai_addrlen);
-        saved=errno;
-        if (result<0 && (saved==EINPROGRESS || saved==EALREADY || saved==EWOULDBLOCK)) {
-            while (armGetSystemTick()<deadline) {
-                struct pollfd wait={.fd=fd,.events=POLLOUT};
-                int ready=poll(&wait,1,0);
-                if (ready<0) { saved=errno; break; }
-                if (ready>0) {
-                    socklen_t len=sizeof(saved);
-                    if (getsockopt(fd,SOL_SOCKET,SO_ERROR,&saved,&len)<0) saved=errno;
-                    result=saved ? -1 : 0;
-                    break;
-                }
-                svcSleepThread(10000000);
-            }
-            if (result<0 && armGetSystemTick()>=deadline) saved=ETIMEDOUT;
-        }
-        if (result==0) break;
-        close(fd); fd=-1;
+        sa_timeout(fd,10);
+        if (!connect(fd,p->ai_addr,p->ai_addrlen)) break;
+        saved=errno; close(fd); fd=-1;
     }
     freeaddrinfo(list); if (fd<0) errno=saved; return fd;
 }
@@ -431,133 +410,75 @@ u32 sa_dir_read(FsDir *dir, char *name, u64 *size, int *type, s64 *count) {
     return rc;
 }
 
-/* Experimental NIFM: private non-domain admin sessions, never libnx's global
- * nifm session (gethostid may have initialized it as User). All potentially
- * blocking IPC, including SM acquisition, runs on this single bounded lane.
- * A timed-out lane is quarantined, never killed/reused while IPC owns memory.
- * No serviceClose: raw owned-handle closure cannot issue another blocking IPC.
- * Step IDs: 1=open admin, 2=general, 3=enumerate, 4=set profile,
- * 5=create request, 6=state, 7=select UUID, 8=submit, 9=deadline, 10=thread, 11=events.
- */
-#include <stdatomic.h>
+/* NIFM is command-scoped: no global session, request, or background IPC.
+ * A command returns only after Cancel and serviceClose have completed. IPC
+ * itself may block in Horizon; never return leaving a quarantined NIFM lane. */
 extern void sa_wifi_log(u32 step, u32 rc);
-static Thread wifi_thread;
-static bool wifi_thread_live;
-static atomic_bool wifi_abandoned;
-static Service wifi_request;
-static Mutex wifi_state_lock;
-static void wifi_drop_request(void) {
-    mutexLock(&wifi_state_lock);
-    if (wifi_request.session) svcCloseHandle(wifi_request.session);
-    memset(&wifi_request,0,sizeof(wifi_request));
-    mutexUnlock(&wifi_state_lock);
-}
-static struct {
-    u32 join, rc;
-    u8 profile[0x17c], records[0x75 * 256];
-    s32 count;
-} wifi_job;
 #define WIFI_TIMEOUT MAKERESULT(Module_Kernel, 117)
 #define WIFI_BAD MAKERESULT(Module_Libnx, LibnxError_BadInput)
-static void wifi_close(Service *s) {
-    if (s->session) svcCloseHandle(s->session);
-    memset(s,0,sizeof(*s));
-}
-static bool wifi_step(u32 step, Result rc) {
-    sa_wifi_log(step,rc);
-    if (!rc && atomic_load_explicit(&wifi_abandoned,memory_order_acquire)) rc=WIFI_TIMEOUT;
-    wifi_job.rc=rc;
-    return rc==0;
-}
-static void wifi_run(void *unused) {
-    (void)unused;
+#define WIFI_STEP(step, expression) (rc=(expression), sa_wifi_log(step,rc), rc==0)
+u32 sa_wifi(u32 join,const u8 *profile,u8 *records,s32 *count) {
+    Result rc=0;
+    *count=0;
     Service root={0}, general={0}, request={0};
-    if (wifi_job.join) wifi_drop_request();
-    if (!wifi_step(1,smGetService(&root,"nifm:a"))) goto out;
+    if (!WIFI_STEP(1,smGetService(&root,"nifm:a"))) goto out;
     u64 reserved=0;
-    if (!wifi_step(2,serviceDispatchIn(&root,5,reserved,
+    if (!WIFI_STEP(2,serviceDispatchIn(&root,5,reserved,
         .in_send_pid=true,.out_num_objects=1,.out_objects=&general))) goto out;
-    if (!wifi_job.join) {
+    if (!join) {
         /* SfNetworkProfileBasicInfo is packed, stride 0x75. All profile types
          * (User|SsidList|Temporary); admin is required for the latter two. */
         u8 types=7;
-        if (!wifi_step(3,serviceDispatchInOut(&general,7,types,wifi_job.count,
+        if (!WIFI_STEP(3,serviceDispatchInOut(&general,7,types,*count,
             .buffer_attrs={SfBufferAttr_Out|SfBufferAttr_HipcMapAlias},
-            .buffers={{wifi_job.records,sizeof(wifi_job.records)}}))) goto out;
-        if (wifi_job.count<0 || wifi_job.count>256) wifi_job.rc=WIFI_BAD;
+            .buffers={{records,0x75 * 256}}))) goto out;
+        if (*count<0 || *count>256) rc=WIFI_BAD;
         goto out;
     }
     Uuid uuid={0};
-    if (!wifi_step(4,serviceDispatchOut(&general,9,uuid,
+    if (!WIFI_STEP(4,serviceDispatchOut(&general,9,uuid,
         .buffer_attrs={SfBufferAttr_In|SfBufferAttr_HipcPointer|SfBufferAttr_FixedSize},
-        .buffers={{wifi_job.profile,sizeof(wifi_job.profile)}}))) goto out;
+        .buffers={{profile,0x17c}}))) goto out;
     s32 preset=2;
-    if (!wifi_step(5,serviceDispatchIn(&general,4,preset,
+    if (!WIFI_STEP(5,serviceDispatchIn(&general,4,preset,
         .out_num_objects=1,.out_objects=&request))) goto out;
     Handle events[2]={0};
     Result event_rc=serviceDispatch(&request,2,
         .out_handle_attrs={SfOutHandleAttr_HipcCopy,SfOutHandleAttr_HipcCopy},
         .out_handles=events);
     for (unsigned i=0;i<2;i++) if (events[i]) svcCloseHandle(events[i]);
-    if (!wifi_step(11,event_rc)) goto out;
+    if (!WIFI_STEP(11,event_rc)) goto out;
     u32 state=0;
-    if (!wifi_step(6,serviceDispatchOut(&request,0,state))) goto out;
-    if (state!=1) { wifi_step(6,WIFI_BAD); goto out; }
-    if (!wifi_step(7,serviceDispatchIn(&request,9,uuid))) goto out;
-    if (!wifi_step(8,serviceDispatch(&request,4))) goto out;
-    /* Retain the request for the connection lifetime; submission isn't DHCP
-     * or association success. Never invoke an applet or SubmitAndWait. */
-    mutexLock(&wifi_state_lock);
-    if (!atomic_load_explicit(&wifi_abandoned,memory_order_acquire)) {
-        wifi_request=request;
-        memset(&request,0,sizeof(request));
+    if (!WIFI_STEP(6,serviceDispatchOut(&request,0,state))) goto out;
+    if (state!=1) { rc=WIFI_BAD; sa_wifi_log(6,rc); goto out; }
+    if (!WIFI_STEP(7,serviceDispatchIn(&request,9,uuid))) goto out;
+    if (!WIFI_STEP(8,serviceDispatch(&request,4))) goto out;
+    /* Observe availability before discarding the request. SetNetworkProfile
+     * above persists the profile; this request must never outlive the command. */
+    u64 deadline=armGetSystemTick()+armNsToTicks(5000000000ULL);
+    for (;;) {
+        if (!WIFI_STEP(6,serviceDispatchOut(&request,0,state))) goto out;
+        if (state==NifmRequestState_Available) break;
+        if (state==NifmRequestState_Invalid || state==NifmRequestState_Unknown1) {
+            rc=WIFI_BAD;
+            goto out;
+        }
+        if (armGetSystemTick()>=deadline) { rc=WIFI_TIMEOUT; goto out; }
+        svcSleepThread(10000000);
     }
-    mutexUnlock(&wifi_state_lock);
 out:
-    memset(wifi_job.profile,0,sizeof(wifi_job.profile));
-    wifi_close(&request);
-    wifi_close(&general);
-    wifi_close(&root);
-    if (wifi_job.rc || atomic_load_explicit(&wifi_abandoned,memory_order_acquire))
-        wifi_drop_request();
-}
-u32 sa_wifi(u32 join,const u8 *profile,u8 *records,s32 *count) {
-    /* Worker is the sole caller. Poll only; a hung old lane costs one thread,
-     * never a second thread or a reusable caller-owned output buffer. */
-    if (wifi_thread_live) {
-        Result rc=waitSingleHandle(wifi_thread.handle,0);
-        if (rc) { sa_wifi_log(9,WIFI_TIMEOUT); return WIFI_TIMEOUT; }
-        threadClose(&wifi_thread);
-        wifi_thread_live=false;
+    if (serviceIsActive(&request)) {
+        Result cancel_rc=serviceDispatch(&request,3); /* IRequest::Cancel */
+        sa_wifi_log(12,cancel_rc);
+        if (!rc) rc=cancel_rc;
     }
-    memset(&wifi_job,0,sizeof(wifi_job));
-    wifi_job.join=join;
-    memcpy(wifi_job.profile,profile,sizeof(wifi_job.profile));
-    atomic_store_explicit(&wifi_abandoned,false,memory_order_release);
-    Result rc=threadCreate(&wifi_thread,wifi_run,NULL,NULL,0x8000,44,-2);
-    if (rc) { sa_wifi_log(10,rc); return rc; }
-    rc=threadStart(&wifi_thread);
-    if (rc) { threadClose(&wifi_thread); sa_wifi_log(10,rc); return rc; }
-    wifi_thread_live=true;
-    rc=waitSingleHandle(wifi_thread.handle,5000000000LL);
-    if (rc) {
-        mutexLock(&wifi_state_lock);
-        atomic_store_explicit(&wifi_abandoned,true,memory_order_release);
-        if (wifi_request.session) svcCloseHandle(wifi_request.session);
-        memset(&wifi_request,0,sizeof(wifi_request));
-        mutexUnlock(&wifi_state_lock);
-        sa_wifi_log(9,rc);
-        return rc;
-    }
-    threadClose(&wifi_thread);
-    wifi_thread_live=false;
-    rc=wifi_job.rc;
-    if (!rc) {
-        *count=wifi_job.count;
-        if (!join) memcpy(records,wifi_job.records,sizeof(wifi_job.records));
-    }
+    serviceClose(&request);
+    serviceClose(&general);
+    serviceClose(&root);
     return rc;
 }
+
+#undef WIFI_STEP
 
 _Static_assert(sizeof(NifmSfNetworkProfileData)==0x17c, "NIFM profile wire size");
 _Static_assert(__builtin_offsetof(NifmSfNetworkProfileData,wireless_setting_data)==0x116, "NIFM wireless offset");

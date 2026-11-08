@@ -1,5 +1,5 @@
 """Validate the deliverable container, NPDM identity and linked target."""
-import hashlib, os, pathlib, re, struct, subprocess
+import hashlib, os, pathlib, re, struct, subprocess, sys
 root = pathlib.Path(__file__).resolve().parent.parent
 artifact = root / 'dist/atmosphere/contents/430000000000000B/exefs.nsp'
 p = artifact.read_bytes()
@@ -28,11 +28,14 @@ symbols = subprocess.check_output([nm, root/'build/swagent.elf'], text=True)
 assert re.search(r' T agent_main$', symbols, re.M)
 assert not re.search(r' T (?:_exit|exit|abort)$', symbols, re.M)
 assert not re.search(r'\b(?:sa_(?:hid_init|buttons|touch|capture|jpeg\w*)|hiddbg\w*|capssc\w*|tj\w*)$', symbols, re.M)
-assert b'swagent-1.17-rs' in elf
+assert b'swagent-1.18-rs' in elf
 assert (root/'build/swagent.nsp').read_bytes() == p
 assert (artifact.parent/'flags/boot2.flag').exists()
 print(f'NSP: PFS0 + NSO + NPDM title ID + AArch64 ELF verified; {len(p):,} bytes')
 print(f'SHA256: {hashlib.sha256(p).hexdigest()}')
+
+if '--sysmodule-only' in sys.argv:
+    sys.exit(0)
 
 nro = (root/'dist/switch/swagent.nro').read_bytes()
 assert nro[0x10:0x14] == b'NRO0'
@@ -47,5 +50,5 @@ assert nro[mod:mod+4] == b'MOD0'
 _, bss_start, bss_end = struct.unpack_from('<III', nro, mod+4)
 assert len(nro) <= mod+bss_end <= len(nro)+struct.unpack_from('<I', nro, 0x38)[0]
 assert mod+bss_start <= mod+bss_end
-assert b'swagent-1.17-rs' in nro and b'swagent-nro %s' in nro
+assert b'swagent-1.18-rs' in nro and b'swagent-nro %s' in nro
 print(f'NRO: NRO0 + page segments + MOD0/BSS verified; {len(nro):,} bytes')

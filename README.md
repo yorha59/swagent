@@ -229,14 +229,14 @@ unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. The console displays
-`swagent-nro swagent-1.17-rs`, the exact `getsockname` bind endpoint
-(`0.0.0.0:6000`), and the console's LAN IP. Connect to that LAN IP on TCP
+`swagent-nro swagent-1.18-rs`, the exact `getsockname` bind endpoint
+(`0.0.0.0:6000`). Find the console's LAN IP in system settings and connect on TCP
 port 6000. Stop the sysmodule first if it already owns that port.
 
 PLUS or a bare TCP `quit` exits the NRO. `quit <title-id>` retains the
 existing title termination command. Both editions use the same Rust command
 handlers, installation services, 16 MiB heap and reusable 4 MiB install chunk.
-`version` reports `swagent-1.17-rs nro` or `swagent-1.17-rs sys`.
+`version` reports `swagent-1.18-rs nro` or `swagent-1.18-rs sys`.
 The `update` command retains its resident sysmodule update behavior; it does
 not replace the running NRO file. Installation uses the existing NS/FS path
 and hbloader permissions; actual service availability depends on the console.
