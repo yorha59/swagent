@@ -594,7 +594,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.18-rs sys\r\n"),
+        ("version", "swagent-1.19-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -603,7 +603,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
         line.clear();
     }
     for _ in 0..9 {
-        protocol::test_receive("log 1")
+        protocol::test_receive("installed")
     }
     client.read_line(&mut line).unwrap();
     assert_eq!(line, "error: busy\r\n");
@@ -1672,6 +1672,15 @@ fn hung_install_operation_times_out_without_reusing_its_lane() {
     protocol::test_receive("ping");
     line.clear(); reader.read_line(&mut line).unwrap();
     assert_eq!(line, "pong\r\n");
+    protocol::test_receive("log 5");
+    let mut saw_file=false;
+    loop {
+        line.clear(); reader.read_line(&mut line).unwrap();
+        if line=="previous boot evidence\r\n" { saw_file=true; }
+        if line=="log: end\r\n" { break; }
+    }
+    assert!(saw_file);
+    assert!(!worker.is_finished());
     unsafe { host_connect_block(0); }
     worker.join().unwrap();
     unsafe { host_clock_offset(0); }
@@ -1729,7 +1738,7 @@ fn nro_version_and_bare_quit() {
     protocol::test_session(server.as_raw_fd());
     unsafe { host_edition(1); }
     let mut client = BufReader::new(client);
-    for (command, expected) in [("version", "swagent-1.18-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
+    for (command, expected) in [("version", "swagent-1.19-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
         protocol::test_receive(command);
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
@@ -1738,4 +1747,17 @@ fn nro_version_and_bare_quit() {
     assert_eq!(unsafe { host_did_quit() }, 1);
     unsafe { host_edition(0); }
     protocol::test_session(-1);
+}
+
+#[test]
+fn boot_log_format_and_installed_confirmation() {
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.19-rs");
+    assert_eq!(installed::parse("installed").unwrap(),None);
+    assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
+    for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
+        assert!(installed::parse(line).is_err(),"{line}");
+    }
+    let mut lines=Vec::new();
+    installed::run("installed",&mut |p| {lines.push(p.to_vec()); Ok(())}).unwrap();
+    assert_eq!(lines[0],b"430000000000000B stale swagent");
 }

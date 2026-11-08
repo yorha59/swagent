@@ -229,14 +229,14 @@ unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. The console displays
-`swagent-nro swagent-1.18-rs`, the exact `getsockname` bind endpoint
+`swagent-nro swagent-1.19-rs`, the exact `getsockname` bind endpoint
 (`0.0.0.0:6000`). Find the console's LAN IP in system settings and connect on TCP
 port 6000. Stop the sysmodule first if it already owns that port.
 
 PLUS or a bare TCP `quit` exits the NRO. `quit <title-id>` retains the
 existing title termination command. Both editions use the same Rust command
 handlers, installation services, 16 MiB heap and reusable 4 MiB install chunk.
-`version` reports `swagent-1.18-rs nro` or `swagent-1.18-rs sys`.
+`version` reports `swagent-1.19-rs nro` or `swagent-1.19-rs sys`.
 The `update` command retains its resident sysmodule update behavior; it does
 not replace the running NRO file. Installation uses the existing NS/FS path
 and hbloader permissions; actual service availability depends on the console.
@@ -245,3 +245,18 @@ and hbloader permissions; actual service availability depends on the console.
 libnx startup stub and MOD0 offsets and writes the standard 0x70-byte NRO0
 header at offset 0x10. NRO2 is not a format accepted by Switch hbmenu.
 `make check` builds both editions and checks host behavior and both containers.
+
+
+Version 1.19 diagnostics: `log [count]` runs alongside a blocked command and dumps
+both the ring and a cached 16 KiB tail of `/switch/swagent.log`, including prior
+boots. A dedicated writer appends and flushes every line, truncating files over
+256 KiB. Producers never wait for SD: a full queue, contended snapshot or SD error
+may drop diagnostics. Boot and install traces include uptime, init results,
+connection attempts/endpoints and 4 MiB receive progress.
+
+`installed` lists NS application records (NAND and SD) as raw title ID plus name;
+missing control data leaves an empty name. `installed del 430000000000000B
+del-430000000000000B-confirm` deletes that application completely through NS.
+The confirmation must match the exact 16-digit title ID argument, including case.
+NS service failures are returned as errors; hardware validation is required for
+service availability on each firmware/sysmodule environment.

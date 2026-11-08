@@ -474,6 +474,13 @@ pub fn install_checked(
         } as u8,
         Release,
     );
+    let mut trace=Text::<192>::new();
+    use core::fmt::Write;
+    match &result {
+        Ok(id) => { let _=write!(trace,"install final ok title={:016x}",id); }
+        Err(e) => { let _=write!(trace,"install final fail {} rc={}",e.0,e.1); }
+    }
+    crate::log::add(trace.str());
     result
 }
 fn install_inner(

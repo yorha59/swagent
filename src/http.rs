@@ -66,7 +66,14 @@ fn download_inner(
     original_total: &mut Option<u64>,
 ) -> Result<u64> {
     use core::sync::atomic::Ordering::Relaxed;
-    let u = parse(url)?;
+    let parsed=parse(url);
+    let mut trace=Text::<512>::new();
+    match &parsed {
+        Ok(u) => { let _=write!(trace,"url parse ok host={} port={} path={}",u.host.str(),u.port.str(),u.path.str()); }
+        Err(e) => { let _=write!(trace,"url parse fail {} rc={}",e.0,e.1); }
+    }
+    crate::log::add(trace.str());
+    let u=parsed?;
     if chunk.is_empty() {
         return Err(Error("empty download buffer", 0));
     }
@@ -195,6 +202,7 @@ fn download_inner(
     }
     let mut file = File::open_mode(path, if start > 0 { 2 } else { 1 })?;
     let mut total = start;
+    let mut logged_chunk=start/(4*1024*1024);
     if chunked {
         loop {
             let mut line = Text::<128>::new();
@@ -245,6 +253,7 @@ fn download_inner(
                 }
                 file.write(total, &chunk[..got])?;
                 total += got as u64;
+                trace_chunk(total,&mut logged_chunk);
                 remaining -= got as u64;
                 if crate::retiring() {
                     return Err(Error("retired", 0));
@@ -280,6 +289,7 @@ fn download_inner(
                 chunk.get(..got).ok_or(Error("HTTP buffer bounds", 0))?,
             )?;
             total += got as u64;
+            trace_chunk(total,&mut logged_chunk);
             if track {
                 crate::install::INSTALL_RX_BYTES.store(total, Relaxed);
             }
@@ -309,5 +319,14 @@ fn receive(sock: &Socket, file: &mut File, bytes: &mut [u8]) -> Result<usize> {
             Err(e)
         }
         ok => ok,
+    }
+}
+
+fn trace_chunk(total:u64, last:&mut u64) {
+    let chunk=total/(4*1024*1024);
+    if chunk>*last {
+        let mut s=Text::<96>::new();
+        let _=write!(s,"download bytes_received={} chunk_4mb={}",total,chunk);
+        crate::log::add(s.str()); *last=chunk;
     }
 }

@@ -21,6 +21,7 @@ impl Slot {
 static NEXT: AtomicU64 = AtomicU64::new(1);
 static SLOTS: [Slot; COUNT] = [const { Slot::new() }; COUNT];
 pub fn add(s: &str) {
+    unsafe { crate::ffi::sa_persist(s.as_ptr(), s.len()); }
     let seq = NEXT.fetch_add(1, AcqRel);
     let Some(slot) = SLOTS.get(seq as usize % COUNT) else {
         return;
@@ -62,4 +63,16 @@ pub fn dump(n: usize, mut send: impl FnMut(&[u8])) {
             send(line.bytes())
         }
     }
+}
+
+pub fn boot_line(ms: u64) -> Text<96> {
+    use core::fmt::Write;
+    let mut s=Text::new();
+    let _=write!(s,"boot uptime_ms={} version=swagent-1.19-rs",ms);
+    s
+}
+pub fn file_tail(mut send: impl FnMut(&[u8])) {
+    let mut bytes=[0u8;16384];
+    let n=unsafe { crate::ffi::sa_log_tail(bytes.as_mut_ptr(),bytes.len()) }.min(bytes.len());
+    for line in bytes[..n].split(|b| *b==b'\n').filter(|v|!v.is_empty()) { send(line); }
 }
