@@ -708,7 +708,13 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.16-rs");
+            let mut s = Text::<64>::new();
+            let _ = write!(s, "{} {}", crate::version(), if crate::is_nro() { "nro" } else { "sys" });
+            let _ = reply(id, s.bytes());
+        }
+        Some("quit") if crate::is_nro() && words.next().is_none() => {
+            let _ = reply(id, b"quit: ok");
+            unsafe { ffi::sa_quit(); }
         }
         _ => enqueue(id, line),
     }

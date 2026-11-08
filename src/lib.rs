@@ -24,7 +24,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 #[cfg(not(test))]
 #[no_mangle]
 pub extern "C" fn agent_main() -> ! {
-    util::sleep(5000);
+    if unsafe { ffi::sa_is_nro() } == 0 { util::sleep(5000); }
     loop {
         let code = unsafe { ffi::sa_init() };
         if code == 0 {
@@ -34,7 +34,7 @@ pub extern "C" fn agent_main() -> ! {
         util::sleep(5000);
     }
     sleep_guard::recover();
-    log::add("swagent-1.16-rs");
+    log::add(version());
     loop {
         let code = unsafe { ffi::sa_spawn(0, protocol::worker, core::ptr::null_mut()) };
         if code == 0 {
@@ -78,3 +78,8 @@ pub extern "C" fn agent_park() -> ! {
     log::add("C runtime fatal fallback intercepted; thread parked");
     util::forever()
 }
+
+pub fn version() -> &'static str {
+    unsafe { core::ffi::CStr::from_ptr(ffi::sa_version()).to_str().unwrap_or("unknown") }
+}
+pub fn is_nro() -> bool { unsafe { ffi::sa_is_nro() != 0 } }

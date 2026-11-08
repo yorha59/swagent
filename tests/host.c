@@ -185,3 +185,10 @@ int sa_accept(int fd) { if(mock_listener) { if(mock_accept<0) { errno=mock_accep
 uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
+
+const char *sa_version(void) { return "swagent-1.17-rs"; }
+static _Thread_local int host_nro, host_quit;
+void host_edition(int nro) { host_nro=nro; host_quit=0; }
+int host_did_quit(void) { return host_quit; }
+int sa_is_nro(void) { return host_nro; }
+void sa_quit(void) { host_quit=1; }

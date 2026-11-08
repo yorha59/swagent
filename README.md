@@ -223,3 +223,25 @@ the original response's known total. A 200 response discards the prefix and
 restarts with a truncated file and a zero byte counter. A 416 response is an
 error, never proof that a partial file is complete. When the original total is
 unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
+
+
+### Manual hbmenu edition (1.17)
+
+Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
+on the SD card. Launch it in hbmenu through Album. The console displays
+`swagent-nro swagent-1.17-rs`, the exact `getsockname` bind endpoint
+(`0.0.0.0:6000`), and the console's LAN IP. Connect to that LAN IP on TCP
+port 6000. Stop the sysmodule first if it already owns that port.
+
+PLUS or a bare TCP `quit` exits the NRO. `quit <title-id>` retains the
+existing title termination command. Both editions use the same Rust command
+handlers, installation services, 16 MiB heap and reusable 4 MiB install chunk.
+`version` reports `swagent-1.17-rs nro` or `swagent-1.17-rs sys`.
+The `update` command retains its resident sysmodule update behavior; it does
+not replace the running NRO file. Installation uses the existing NS/FS path
+and hbloader permissions; actual service availability depends on the console.
+
+`tools/nro_packer.py` uses only Python's standard library. It preserves the
+libnx startup stub and MOD0 offsets and writes the standard 0x70-byte NRO0
+header at offset 0x10. NRO2 is not a format accepted by Switch hbmenu.
+`make check` builds both editions and checks host behavior and both containers.
