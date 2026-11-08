@@ -28,7 +28,7 @@ symbols = subprocess.check_output([nm, root/'build/swagent.elf'], text=True)
 assert re.search(r' T agent_main$', symbols, re.M)
 assert not re.search(r' T (?:_exit|exit|abort)$', symbols, re.M)
 assert not re.search(r'\b(?:sa_(?:hid_init|buttons|touch|capture|jpeg\w*)|hiddbg\w*|capssc\w*|tj\w*)$', symbols, re.M)
-assert b'swagent-1.21-rs' in elf
+assert b'swagent-1.22-rs' in elf
 assert (root/'build/swagent.nsp').read_bytes() == p
 assert (artifact.parent/'flags/boot2.flag').exists()
 print(f'NSP: PFS0 + NSO + NPDM title ID + AArch64 ELF verified; {len(p):,} bytes')
@@ -50,5 +50,25 @@ assert nro[mod:mod+4] == b'MOD0'
 _, bss_start, bss_end = struct.unpack_from('<III', nro, mod+4)
 assert len(nro) <= mod+bss_end <= len(nro)+struct.unpack_from('<I', nro, 0x38)[0]
 assert mod+bss_start <= mod+bss_end
-assert b'swagent-1.21-rs' in nro and b'swagent-nro %s' in nro
+assert b'swagent-1.22-rs' in nro and b'listening %s:6000' in nro
 print(f'NRO: NRO0 + page segments + MOD0/BSS verified; {len(nro):,} bytes')
+
+# Verify hbmenu uses libnx crt0/default runtime rather than resident overrides.
+nro_elf = root/'build/swagent-nro.elf'
+nro_symbols = subprocess.check_output([nm, nro_elf], text=True)
+for symbol in ('__appInit', '__libnx_initheap', '__appExit'):
+    assert re.search(r' W ' + symbol + r'$', nro_symbols, re.M), symbol
+assert re.search(r'^0+ T _start$', nro_symbols, re.M)
+assert re.search(r' T agent_nro_main$', nro_symbols, re.M)
+assert not re.search(r' T agent_main$', nro_symbols, re.M)
+objdump = nm.with_name('aarch64-none-elf-objdump')
+def disassemble(symbol):
+    return subprocess.check_output([objdump, '-d', '--disassemble='+symbol, nro_elf], text=True)
+init = disassemble('sa_init')
+assert not any(name in init for name in ('smInitialize', 'fsInitialize', 'setsysInitialize', 'log_writer'))
+main = disassemble('main')
+assert main.index('<consoleInit>') < main.index('<threadStart>')
+assert '<svcExitProcess>' not in main
+assert '<sleep_guard' not in disassemble('agent_nro_main')
+assert re.search(r' T __libnx_initheap$', symbols, re.M)
+print('NRO entry: libnx crt0/heap/app init + console-before-worker + isolated network init verified')

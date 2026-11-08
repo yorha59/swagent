@@ -733,9 +733,10 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
             return;
         }
-        Some("quit") if crate::is_nro() && words.next().is_none() => {
+        Some("quit") if words.next().is_none() => {
             let _ = reply(id, b"quit: ok");
-            unsafe { ffi::sa_quit(); }
+            if crate::is_nro() { unsafe { ffi::sa_quit(); } }
+            disconnect(id);
             return;
         }
         _ => {}
@@ -938,7 +939,7 @@ fn client_loop(fd: i32, id: u64) {
                     _ => {}
                 }
             }
-            if retiring() {
+            if retiring() || session(id).with(|s| s.id != id || s.fd < 0) {
                 break 'client;
             }
         }

@@ -225,26 +225,28 @@ error, never proof that a partial file is complete. When the original total is
 unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 
-### Manual hbmenu edition (1.17)
+### Manual hbmenu edition (1.22)
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
-on the SD card. Launch it in hbmenu through Album. The console displays
-`swagent-nro swagent-1.21-rs`, the exact `getsockname` bind endpoint
-(`0.0.0.0:6000`). Find the console's LAN IP in system settings and connect on TCP
-port 6000. Stop the sysmodule first if it already owns that port.
+on the SD card. Launch it in hbmenu through Album. After binding, the console
+prints `swagent-1.22-rs listening IP:6000 (PLUS or quit to exit)` with the LAN IP.
+The listener binds all interfaces. Stop the sysmodule first if it owns port 6000.
 
-PLUS or a bare TCP `quit` exits the NRO. `quit <title-id>` retains the
-existing title termination command. Both editions use the same Rust command
-handlers, installation services, 16 MiB heap and reusable 4 MiB install chunk.
-`version` reports `swagent-1.21-rs nro` or `swagent-1.21-rs sys`.
-The `update` command retains its resident sysmodule update behavior; it does
-not replace the running NRO file. Installation uses the existing NS/FS path
-and hbloader permissions; actual service availability depends on the console.
+Bare TCP `quit` replies `quit: ok` and closes that client in both editions;
+in the NRO it also returns to hbmenu, as does PLUS. `quit <title-id>` retains
+the existing title termination command. Both editions share Rust command
+handlers and the reusable 4 MiB install chunk. The resident edition uses its
+16 MiB static heap; the NRO uses libnx's hbloader-provided heap and standard
+applet/HID/FS startup. It initializes the console before starting network workers,
+skips resident sleep-setting recovery, firmware probing and the SD log writer,
+and prints the endpoint only from the console thread.
+`version` reports `swagent-1.22-rs nro` or `swagent-1.22-rs sys`.
+The `update` command retains its resident sysmodule update behavior.
 
-`tools/nro_packer.py` uses only Python's standard library. It preserves the
-libnx startup stub and MOD0 offsets and writes the standard 0x70-byte NRO0
-header at offset 0x10. NRO2 is not a format accepted by Switch hbmenu.
-`make check` builds both editions and checks host behavior and both containers.
+`make nro` uses official devkitPro `elf2nro` and libnx crt0/relocation handling.
+`tools/nro_packer.py` remains an independently tested packaging utility.
+`make check` builds both editions and checks host behavior, containers, and NRO
+entry symbols/init gating. Launch and IPC behavior still require Switch hardware.
 
 
 Version 1.19 diagnostics: `log [count]` runs alongside a blocked command and dumps
@@ -254,8 +256,11 @@ boots. A dedicated writer appends and flushes every line, truncating files over
 may drop diagnostics. Boot and install traces include uptime, init results,
 connection attempts/endpoints and 4 MiB receive progress.
 
-`installed` lists NS application records (NAND and SD) as raw title ID plus name;
-missing control data leaves an empty name. `installed del 430000000000000B
+`installed` lists NS application records (NAND and SD) as raw title ID plus an
+empty name. In 1.22 it opens the install path's application-manager interface
+(`ns:am2` command 7996 on modern firmware) directly and dispatches
+ListApplicationRecord command 0. It avoids `nsInitialize` service fallback and
+optional control-data queries. `ns:su` is SystemUpdate, not application management. `installed del 430000000000000B
 del-430000000000000B-confirm` deletes that application completely through NS.
 The confirmation must match the exact 16-digit title ID argument, including case.
 NS service failures are returned as errors; hardware validation is required for
@@ -276,8 +281,7 @@ The 1.16 queue inspection found no missing readiness flag or signal: it used a
 5 ms poll, not a notification primitive. The 1.19 source logged install arguments,
 not every worker command. Host verification does not establish the cause of the
 reported hardware stall; the new timestamps are intended to locate it if it
-persists. This release builds only the sysmodule NSP; the existing NRO is not
-updated.
+persists. Version 1.22 builds both the sysmodule NSP and NRO.
 
 Version 1.21 makes the worker fallback explicit after fast-path returns. Unknown
 commands also enter the queue and reply `error: unknown command: X`. All 1.19
