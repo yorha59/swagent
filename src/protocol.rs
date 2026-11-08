@@ -737,7 +737,6 @@ fn receive(id: u64, line: Text<512>) {
         }
         Some("quit") if words.next().is_none() => {
             let _ = reply(id, b"quit: ok");
-            if crate::is_nro() { unsafe { ffi::sa_quit(); } }
             disconnect(id);
             return;
         }
@@ -932,7 +931,7 @@ fn client_loop(fd: i32, id: u64) {
                 match result {
                     Ok(line) if line.len > 0 => {
                         let cmd = line.str().split_ascii_whitespace().next().unwrap_or("");
-                        if matches!(cmd, "put" | "cat" | "tail" | "ls" | "mkdir") {
+                        if matches!(cmd, "put" | "cat" | "tail" | "ls" | "mkdir" | "rm") {
                             match file_line(id, line.str()) {
                                 Ok(u) => upload = u,
                                 Err(e) => {
@@ -1145,7 +1144,7 @@ mod upload_tests {
 #[cfg(test)]
 pub fn test_file_line(line: &str) {
     if let Err(e) = file_line(42, line) {
-        file_error(42, "put", e);
+        file_error(42, line.split_ascii_whitespace().next().unwrap_or(""), e);
     }
 }
 

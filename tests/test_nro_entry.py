@@ -30,7 +30,7 @@ class NroEntryTest(unittest.TestCase):
             self.assertRegex(main[output.end():], r'^\s*consoleUpdate\(\(\(void \*\)0\)\)|^\s*consoleUpdate\(NULL\)')
         self.assertIn('SWAgent %s', main)
         self.assertIn('port 6000 busy - sysmodule already running', main)
-        self.assertIn('press PLUS to exit', main)
+        self.assertIn('press HOME to exit', main)
         self.assertIn('svcSleepThread(100000000)', main)
         self.assertIn('HidNpadButton_Plus', main)
 

@@ -225,24 +225,24 @@ error, never proof that a partial file is complete. When the original total is
 unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 
-### Manual hbmenu edition (1.22)
+### Manual hbmenu edition (1.30)
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. After binding, the console
-prints `swagent-1.22-rs listening IP:6000 (PLUS or quit to exit)` with the LAN IP.
+prints `swagent-1.30-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
 The listener binds all interfaces. If the sysmodule owns port 6000, the NRO
 shows a busy message and retries every five seconds, taking over automatically
-when the port becomes available. PLUS exits while waiting.
+when the port becomes available. PLUS displays the HOME instruction while waiting.
 
 Bare TCP `quit` replies `quit: ok` and closes that client in both editions;
-in the NRO it also returns to hbmenu, as does PLUS. `quit <title-id>` retains
+in the NRO it leaves the agent running until HOME system teardown. `quit <title-id>` retains
 the existing title termination command. Both editions share Rust command
 handlers and the reusable 4 MiB install chunk. The resident edition uses its
 16 MiB static heap; the NRO uses libnx's hbloader-provided heap and standard
 applet/HID/FS startup. It initializes the console before starting network workers,
 skips resident sleep-setting recovery, firmware probing and the SD log writer,
 and prints the endpoint only from the console thread.
-`version` reports `swagent-1.22-rs nro` or `swagent-1.22-rs sys`.
+`version` reports `swagent-1.30-rs nro` or `swagent-1.30-rs sys`.
 The `update` command retains its resident sysmodule update behavior.
 
 `make nro` uses official devkitPro `elf2nro` and libnx crt0/relocation handling.
@@ -329,32 +329,21 @@ console after each status print and every 100ms while polling PLUS. Bind
 failures retry every five seconds; a busy port shows the sysmodule warning,
 and successful takeover displays the LAN IP and port.
 
-Version 1.28 (`swagent-1.28-rs`) shuts down the NRO cooperatively on PLUS,
-applet exit, or listener-lane exit. A shared atomic flag stops the listener,
-worker, four client lanes, watchdog, and logger. Shutdown wakes the listener
-socket; its owner unregisters and closes it. The job wait polls shutdown every
-10ms and command budget checks cancel work during exit. Main joins the listener
-before reading its spawn records, then joins every started lane and the logger
-before `consoleExit()` and loader return. All joins share a three-second
-deadline. A failed join logs and displays the thread name and error, then keeps
-the NRO mapped in a safe wait loop. Blocking service IPC can therefore prevent
-exit, but cannot leave a live thread executing an unmapped NRO image.
-Host lifecycle tests execute the production spawn/join and shutdown functions
-with pthread adapters, check flag propagation and all eight joins before return,
-and verify that a refused join never returns.
+Version 1.30 (`swagent-1.30-rs`) leaves NRO teardown to the system. Press HOME
+to exit. PLUS only prints `press HOME to exit` and refreshes the console; main
+never returns, including when the applet loop reports exit or startup fails.
+Workers keep running until system teardown. Bare `quit` disconnects the client.
+The custom socket-close/join/consoleExit sequence has been removed following
+three reported bsdsocket crashes on hardware in 1.27–1.29; the reported HOME
+system teardown did not crash. Host checks cannot establish hardware safety.
+The banner, live console logs, busy-port message and five-second listener retry
+remain unchanged.
 
+`rm <SD-path>` deletes one exact file and replies `rm: ok`, or `rm: error ...`.
+It uses the put whitelist (`switch/`, `atmosphere/config/`, `bootloader/`),
+rejects traversal and extra arguments, and uses file-only deletion so directories
+are refused. No wildcard expansion or recursive deletion is performed.
 
-Version 1.29 (`swagent-1.29-rs`) adds `tail <SD-path> [n]` (default 40).
-It scans backwards in 4 KiB blocks, then streams the selected bytes between
-`tail: begin` and `tail: end` replies, preserving original line endings and a
-missing final newline. Zero lines returns empty content. Memory is constant even
-for files or individual lines larger than the heap. `cat` retains its 256 KiB
-cap: concurrent whole-file allocations make a 4 MiB cap unsafe on the 16 MiB heap.
-
-Outbound TCP sockets are nonblocking before connect. Polling has a 15-second
-monotonic deadline per attempt, at most three attempts, and logs
-`connect timeout attempt=N` before closing and retrying. DNS resolution precedes
-this TCP deadline. Accepted and outbound sockets have receive/send timeouts.
-NRO shutdown closes the listener and all tracked accepted/outbound sockets before
-joining any thread; socket creation is rejected after shutdown starts. These are
-shutdown safeguards, not a diagnosis of the reported system-process crash.
+`tail <SD-path> [n]` (default 40) scans backwards in 4 KiB blocks and streams
+selected bytes between `tail: begin` and `tail: end`. Outbound connections retain
+the 15-second per-attempt poll timeout and close failed sockets before retrying.

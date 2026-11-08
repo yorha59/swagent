@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.29-rs"; }
+const char *sa_version(void) { return "swagent-1.30-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -24,15 +24,9 @@ int sa_is_nro(void) {
     return 0;
 #endif
 }
-#ifdef SA_NRO
-#include <stdatomic.h>
-static atomic_bool nro_quit;
-void sa_quit(void) { atomic_store(&nro_quit, true); }
-int sa_stopping(void) { return atomic_load(&nro_quit); }
-#else
+/* Process lifetime is owned by the system; commands never stop workers. */
 void sa_quit(void) {}
 int sa_stopping(void) { return 0; }
-#endif
 #ifndef SA_NRO
 /* Resident heap only. hbmenu supplies its heap through the loader ABI. */
 void __libnx_initheap(void) {
@@ -43,14 +37,14 @@ void __libnx_initheap(void) {
 void __appInit(void) {}
 void __appExit(void) {}
 #endif
-/* NRO retains libnx's default heap, applet/HID/FS init and loader return ABI. */
+/* NRO retains libnx default heap and applet/HID/FS initialization. */
 extern void agent_main(void);
 #ifdef SA_NRO
 extern void agent_nro_main(void);
 /* UI reads status; only the main thread touches the console. */
+#include <stdatomic.h>
 static atomic_int nro_listener_status;
-static void nro_agent(void *arg) { (void)arg; agent_nro_main(); sa_quit(); }
-static void nro_shutdown(Thread *agent, bool started);
+static void nro_agent(void *arg) { (void)arg; agent_nro_main(); for (;;) svcSleepThread(100000000); }
 int main(void) {
     /* Must be the first call: stdout uses the software console framebuffer.
      * Printing before consoleInit causes ConsoleSwRenderer_drawChar to abort. */
@@ -64,37 +58,37 @@ int main(void) {
     Thread agent;
     Result rc = threadCreate(&agent, nro_agent, NULL, NULL, 0x18000, 44, -2);
     if (!rc) { rc = threadStart(&agent); if (rc) threadClose(&agent); }
-    bool agent_started = !rc;
     if (rc) {
-        printf("agent startup failed: 0x%x\npress PLUS to exit\n", rc);
+        printf("agent startup failed: 0x%x\npress HOME to exit\n", rc);
         consoleUpdate(NULL);
     }
     int announced=0;
-    while (appletMainLoop() && !atomic_load(&nro_quit)) {
+    for (;;) {
+        appletMainLoop();
         int status=atomic_load(&nro_listener_status);
         if (status != announced) {
             if (status == 1) {
                 struct in_addr ip={.s_addr=gethostid()};
-                printf("listening %s:6000\npress PLUS to exit\n", inet_ntoa(ip));
+                printf("listening %s:6000\npress HOME to exit\n", inet_ntoa(ip));
                 consoleUpdate(NULL);
             } else if (status == -EADDRINUSE) {
-                printf("port 6000 busy - sysmodule already running\npress PLUS to exit\n");
+                printf("port 6000 busy - sysmodule already running\npress HOME to exit\n");
                 consoleUpdate(NULL);
             } else if (status < 0) {
-                printf("listener failed: errno=%d; retrying every 5s\npress PLUS to exit\n", -status);
+                printf("listener failed: errno=%d; retrying every 5s\npress HOME to exit\n", -status);
                 consoleUpdate(NULL);
             }
             announced=status;
         }
         padUpdate(&pad);
-        if (padGetButtonsDown(&pad) & HidNpadButton_Plus) break;
+        if (padGetButtonsDown(&pad) & HidNpadButton_Plus) {
+            printf("press HOME to exit\n");
+            consoleUpdate(NULL);
+        }
         consoleUpdate(NULL);
         svcSleepThread(100000000);
     }
-    nro_shutdown(&agent, agent_started);
-    consoleExit(NULL);
-    /* Return through libnx to hbmenu; do not kill the loader process. */
-    return 0;
+
 }
 #else
 int main(void) { agent_main(); for (;;) svcSleepThread(3600000000000LL); }
@@ -206,17 +200,6 @@ int sa_close(int fd) {
     mutexUnlock(&listener_lock);
     return result;
 }
-static void close_all_sockets(void) {
-    mutexLock(&listener_lock);
-    if (listener_fd>=0) { shutdown(listener_fd,SHUT_RDWR); close(listener_fd); listener_fd=-1; }
-    for (unsigned i=0;i<32;i++) if (active_sockets[i]) {
-        int fd=active_sockets[i]-1;
-        shutdown(fd,SHUT_RDWR);
-        close(fd);
-        active_sockets[i]=0;
-    }
-    mutexUnlock(&listener_lock);
-}
 void sa_listener_close(int fd) {
     mutexLock(&listener_lock);
     if (listener_fd==fd) { listener_fd=-1; close(fd); }
@@ -242,8 +225,19 @@ static u32 sa_net_init(void) {
     socket_ok = R_SUCCEEDED(rc);
     return rc;
 }
+static void reset_network_sockets(void) {
+    mutexLock(&listener_lock);
+    if (listener_fd>=0) { shutdown(listener_fd,SHUT_RDWR); close(listener_fd); listener_fd=-1; }
+    for (unsigned i=0;i<32;i++) if (active_sockets[i]) {
+        int fd=active_sockets[i]-1;
+        shutdown(fd,SHUT_RDWR);
+        close(fd);
+        active_sockets[i]=0;
+    }
+    mutexUnlock(&listener_lock);
+}
 u32 sa_net_reinit(void) {
-    close_all_sockets();
+    reset_network_sockets();
     if (socket_ok) socketExit();
     socket_ok = false;
     return sa_net_init();
@@ -728,39 +722,3 @@ u32 sa_installed_delete(u64 title) {
     Result rc=nsInitialize(); if(rc)return rc;
     rc=nsDeleteApplicationCompletely(title); nsExit(); return rc;
 }
-
-#ifdef SA_NRO
-/* A signaled kernel thread handle is required before releasing its stack/TLS.
- * One shared deadline bounds shutdown; a failed join must never reach hbloader. */
-static bool join_until(Thread *thread, const char *name, u64 deadline) {
-    u64 now=sa_now_ms();
-    Result rc=waitSingleHandle(thread->handle, (deadline>now ? deadline-now : 0)*1000000ULL);
-    if (!rc) rc=threadWaitForExit(thread);
-    if (!rc) rc=threadClose(thread);
-    if (rc) {
-        char line[128]; snprintf(line,sizeof(line),"shutdown: %s join failed rc=0x%x; keeping NRO mapped",name,rc);
-        sa_persist(line,strlen(line));
-        printf("%s\n",line);
-        consoleUpdate(NULL);
-    }
-    return !rc;
-}
-static void nro_shutdown(Thread *agent, bool started) {
-    sa_quit();
-    u64 deadline=sa_now_ms()+3000;
-    close_all_sockets();
-    /* The job semaphore is initialized by the listener lane. Its bounded wait
-     * observes shutdown even if exit raced with initialization. */
-    bool ok=true;
-    if (started) ok=join_until(agent,"listener",deadline);
-    /* Joining listener first establishes visibility of every spawn record. */
-    if (ok) {
-        for (unsigned i=0;i<6;i++) if (thread_started[i]) {
-            char name[32]; snprintf(name,sizeof(name),"worker-%u",i);
-            if (!join_until(&threads[i],name,deadline)) ok=false;
-        }
-        if (log_started && !join_until(&log_thread,"logger",deadline)) ok=false;
-    }
-    if (!ok) for (;;) { consoleUpdate(NULL); svcSleepThread(100000000); }
-}
-#endif
