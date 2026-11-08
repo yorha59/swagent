@@ -594,7 +594,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.17-rs sys\r\n"),
+        ("version", "swagent-1.18-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1729,7 +1729,7 @@ fn nro_version_and_bare_quit() {
     protocol::test_session(server.as_raw_fd());
     unsafe { host_edition(1); }
     let mut client = BufReader::new(client);
-    for (command, expected) in [("version", "swagent-1.17-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
+    for (command, expected) in [("version", "swagent-1.18-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
         protocol::test_receive(command);
         let mut line = String::new();
         client.read_line(&mut line).unwrap();

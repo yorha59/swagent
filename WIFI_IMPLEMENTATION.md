@@ -20,7 +20,7 @@ The wireless metadata mappings follow libnx's native-to-wire conversion;
 Switchbrew leaves those three packed metadata descriptions blank. No literal
 0x22 prefix, quoted payload, or SfSsidList serialization is involved.
 
-## Behavior
+## Historical 1.14 behavior (superseded below)
 
 `wifi` enumerates all profile types (mask 7) via admin command 7, filters WiFi,
 and reports zero-based enumeration indices. Maximum 256 entries; overflow
@@ -57,3 +57,24 @@ maximum lengths/rejections, quoted command failure followed by responsive ping).
 Artifact checks: passed. Full `make check`: sandbox denied mock HTTP server
 bind (EPERM), followed by shared test-lock poisoning; not a clean full-suite
 pass. NIFM execution/timeouts require Switch hardware validation. No commit.
+
+## 1.18 scoped lifecycle
+
+NIFM is opened only by a WiFi command. No static service or request survives
+a command, and no background NIFM lane remains after a timeout. Join persists
+the profile with SetNetworkProfile, submits a local request, polls availability
+for up to five seconds, then cancels and closes the request and both services
+with serviceClose on every exit. The polling deadline cannot bound a Horizon
+IPC that itself blocks; command completion waits for cleanup. A saved profile
+may remain after an error. Continued association after request cancellation
+requires hardware validation. No INetworkProfile object is created.
+
+The sysmodule startup and HTTP/install path do not call NIFM. The initial BSD
+connector is restored to the 1.13 socket + ten-second timeout + blocking connect
+sequence; Range resume and immediate reporting of connect failures remain.
+
+Validation for 1.18: all 46 host tests passed; sysmodule-only artifact checks
+and the NRO packer unit test passed (no NRO built). `make -j8 all` produced
+178,636-byte exefs.nsp, SHA256
+`22b842e27b9c2e844ed4258b7d4259d793fff13f1af0c414ac24604a8fa6e48e`.
+Hardware/NIFM behavior has not been tested.
