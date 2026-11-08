@@ -36,7 +36,7 @@ build/swagent-nro.elf: rust build/shim-nro.o
 nro: dist/switch/swagent.nro
 dist/switch/swagent.nro: build/swagent-nro.elf tools/nro_packer.py
 	mkdir -p $(@D)
-	python3 tools/nro_packer.py $< $@
+	$(DEVKITPRO)/tools/bin/elf2nro $< $@
 check: all nro
 	mkdir -p build
 	cc -Wall -Wextra -c tests/host.c -o build/host.o
