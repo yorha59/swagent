@@ -328,3 +328,17 @@ Version 1.27 (`swagent-1.27-rs`) displays a startup banner and refreshes the
 console after each status print and every 100ms while polling PLUS. Bind
 failures retry every five seconds; a busy port shows the sysmodule warning,
 and successful takeover displays the LAN IP and port.
+
+Version 1.28 (`swagent-1.28-rs`) shuts down the NRO cooperatively on PLUS,
+applet exit, or listener-lane exit. A shared atomic flag stops the listener,
+worker, four client lanes, watchdog, and logger. Shutdown wakes the listener
+socket; its owner unregisters and closes it. The job wait polls shutdown every
+10ms and command budget checks cancel work during exit. Main joins the listener
+before reading its spawn records, then joins every started lane and the logger
+before `consoleExit()` and loader return. All joins share a three-second
+deadline. A failed join logs and displays the thread name and error, then keeps
+the NRO mapped in a safe wait loop. Blocking service IPC can therefore prevent
+exit, but cannot leave a live thread executing an unmapped NRO image.
+Host lifecycle tests execute the production spawn/join and shutdown functions
+with pthread adapters, check flag propagation and all eight joins before return,
+and verify that a refused join never returns.

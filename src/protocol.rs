@@ -141,10 +141,12 @@ static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 pub extern "C" fn worker(_: *mut core::ffi::c_void) {
     log::add("worker: ready");
     loop {
+        if crate::stopping() { return; }
         if retiring() {
             forever()
         }
         unsafe { ffi::sa_jobs_wait(); }
+        if crate::stopping() { return; }
         #[cfg(test)]
         if STOP_WORKER.load(Acquire) { return; }
         let job = QUEUE.with(Queue::pop);
@@ -271,7 +273,7 @@ static JOB_STATE: Lock<JobState> = Lock::new(JobState {
     install: false,
 });
 pub extern "C" fn watchdog(_: *mut core::ffi::c_void) {
-    loop {
+    while !crate::stopping() {
         check_budget();
         sleep(20);
     }
@@ -648,7 +650,7 @@ fn update(id: u64, url: &str) -> Result {
     if listener >= 0 {
         unsafe {
             ffi::shutdown(listener, 2);
-            ffi::close(listener);
+            ffi::sa_listener_close(listener);
         }
     }
     let _ = reply(id, b"update: ok");
@@ -851,7 +853,7 @@ fn file_line(id: u64, line: &str) -> Result<Option<Upload>> {
 // The accept thread never reads commands or touches a file.
 pub extern "C" fn client_worker(arg: *mut core::ffi::c_void) {
     let slot = arg as usize;
-    loop {
+    while !crate::stopping() {
         if !CLIENT_READY[slot].load(Acquire) {
             sleep(5);
             continue;
@@ -866,6 +868,7 @@ fn client_loop(fd: i32, id: u64) {
     let mut upload: Option<Upload> = None;
     let mut last_input = now_ms();
     'client: loop {
+        if crate::stopping() { break; }
         if upload.is_some() && now_ms() - last_input >= 30_000 {
             let _ = reply(id, b"put: error timeout/short read");
             break;
@@ -999,7 +1002,7 @@ fn serve_step(server: &mut i32) {
             log::add(line.str());
             if crate::is_nro() {
                 // Main thread polls PLUS and refreshes the console independently.
-                for _ in 0..50 { sleep(100); }
+                for _ in 0..50 { if crate::stopping() { return; } sleep(100); }
             } else {
                 sleep(250);
             }
@@ -1011,19 +1014,22 @@ fn serve_step(server: &mut i32) {
     if !listener_step(*server) {
         LISTENER.store(-1, Release);
         unsafe {
-            ffi::close(*server);
+            ffi::sa_listener_close(*server);
         }
         *server = -1;
         log::add("listener: closed; recreating");
         sleep(100);
     }
 }
-pub fn serve() -> ! {
+pub fn serve() {
     let mut server = -1;
     loop {
-        if retiring() {
-            forever()
+        if crate::stopping() {
+            LISTENER.store(-1, Release);
+            if server >= 0 { unsafe { ffi::sa_listener_close(server); } }
+            return;
         }
+        if retiring() { forever() }
         serve_step(&mut server);
     }
 }

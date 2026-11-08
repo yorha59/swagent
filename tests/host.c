@@ -200,7 +200,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.27-rs"; }
+const char *sa_version(void) { return "swagent-1.28-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
@@ -218,3 +218,6 @@ static unsigned jobs_count;
 void sa_jobs_init(void) { pthread_mutex_lock(&jobs_mutex); jobs_count=0; pthread_mutex_unlock(&jobs_mutex); }
 void sa_jobs_signal(void) { pthread_mutex_lock(&jobs_mutex); jobs_count++; pthread_cond_signal(&jobs_cond); pthread_mutex_unlock(&jobs_mutex); }
 void sa_jobs_wait(void) { pthread_mutex_lock(&jobs_mutex); while(!jobs_count) pthread_cond_wait(&jobs_cond,&jobs_mutex); jobs_count--; pthread_mutex_unlock(&jobs_mutex); }
+
+int sa_stopping(void) { return 0; }
+void sa_listener_close(int fd) { close(fd); }

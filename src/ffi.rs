@@ -42,6 +42,8 @@ extern "C" {
     pub fn sa_version() -> *const c_char;
     pub fn sa_is_nro() -> i32;
     pub fn sa_quit();
+    pub fn sa_stopping() -> i32;
+    pub fn sa_listener_close(fd: i32);
     pub fn sa_wifi(join: u32, profile: *const u8, records: *mut u8, count: *mut i32) -> u32;
     pub fn sa_mkdir(p: *const c_char) -> u32;
     pub fn sa_dir_open(p: *const c_char, out: *mut Service) -> u32;
