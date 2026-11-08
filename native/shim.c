@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.21-rs"; }
+const char *sa_version(void) { return "swagent-1.22-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -31,26 +31,25 @@ void sa_quit(void) { atomic_store(&nro_quit, true); }
 #else
 void sa_quit(void) {}
 #endif
+#ifndef SA_NRO
+/* Resident heap only. hbmenu supplies its heap through the loader ABI. */
 void __libnx_initheap(void) {
     static u8 heap[16 * 1024 * 1024] __attribute__((aligned(0x1000)));
     extern void *fake_heap_start, *fake_heap_end;
     fake_heap_start = heap; fake_heap_end = heap + sizeof(heap);
 }
-void __appInit(void) {
-#ifdef SA_NRO
-    smInitialize();
-    appletInitialize();
-    hidInitialize();
-#endif
-}
+void __appInit(void) {}
 void __appExit(void) {}
+#endif
+/* NRO retains libnx's default heap, applet/HID/FS init and loader return ABI. */
 extern void agent_main(void);
 #ifdef SA_NRO
-static void nro_agent(void *arg) { (void)arg; agent_main(); }
+extern void agent_nro_main(void);
+static atomic_bool nro_listening;
+static void nro_agent(void *arg) { (void)arg; agent_nro_main(); }
 int main(void) {
     consoleInit(NULL);
-    printf("swagent-nro %s\n", sa_version());
-    printf("PLUS or TCP quit: exit to hbmenu\n");
+    /* SD is mounted by the standard libnx __appInit before main. */
     PadState pad;
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&pad);
@@ -58,7 +57,13 @@ int main(void) {
     Result rc = threadCreate(&agent, nro_agent, NULL, NULL, 0x18000, 44, -2);
     if (!rc) rc = threadStart(&agent);
     if (rc) printf("agent startup failed: 0x%x\n", rc);
+    bool announced=false;
     while (appletMainLoop() && !atomic_load(&nro_quit)) {
+        if (!announced && atomic_load(&nro_listening)) {
+            struct in_addr ip={.s_addr=gethostid()};
+            printf("%s listening %s:6000 (PLUS or quit to exit)\n", sa_version(), inet_ntoa(ip));
+            announced=true;
+        }
         padUpdate(&pad);
         if (padGetButtonsDown(&pad) & HidNpadButton_Plus) break;
         consoleUpdate(NULL);
@@ -66,7 +71,8 @@ int main(void) {
     }
     /* All service/socket/thread resources belong to this process. Terminate
      * together, including a worker potentially blocked in service IPC. */
-    svcExitProcess();
+    consoleExit(NULL);
+    /* Return through libnx to hbmenu; do not kill the loader process. */
     return 0;
 }
 #else
@@ -167,6 +173,10 @@ u32 sa_net_reinit(void) {
     return sa_net_init();
 }
 u32 sa_init(void) {
+#ifdef SA_NRO
+    /* libnx already initialized SM/FS and mounted SD. No resident recovery. */
+    return sa_net_init();
+#else
     static bool sm_ok, fs_ok, sd_ok;
     Result rc;
     if (!sm_ok) { rc=smInitialize(); sa_trace("sm-init",rc); if(rc) return rc; sm_ok=true; }
@@ -182,6 +192,7 @@ u32 sa_init(void) {
         sa_trace("log-thread",lr);
     }
     sa_trace("bsd-init-start",0); rc=sa_net_init(); sa_trace("bsd-init",rc); return rc;
+#endif
 }
 ssize_t sa_send(int fd, const void *p, size_t n, int flags) { return send(fd,p,n,flags); }
 ssize_t sa_recv(int fd, void *p, size_t n, int flags) { return recv(fd,p,n,flags); }
@@ -202,12 +213,9 @@ int sa_listen(void) {
     /* Poll accept so worker connect failures can wake the recovery loop even
      * when no client is connected. Do not rely on accept honoring RCVTIMEO. */
     if (fcntl(fd,F_SETFL,O_NONBLOCK) < 0) { int e=errno; close(fd); return -e; }
-    struct sockaddr_in bound;
-    socklen_t bound_len = sizeof(bound);
-    if (getsockname(fd, (struct sockaddr *)&bound, &bound_len) == 0) {
-        printf("TCP listener bound %s:%u\n", inet_ntoa(bound.sin_addr), ntohs(bound.sin_port));
-        fflush(stdout);
-    }
+#ifdef SA_NRO
+    atomic_store(&nro_listening,true);
+#endif
     sa_trace("listener-bind",0); return fd;
 }
 int sa_accept(int fd) {
@@ -576,28 +584,32 @@ u64 sa_thread_id(void) { u64 id=0; svcGetThreadId(&id,CUR_THREAD_HANDLE); return
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-/* nsInitialize selects ns:am2 on modern firmware; AM provides records and
- * deletion without an applet proxy, including records lacking control data. */
+/* Use the install path's application-manager interface directly. ns:su is
+ * SystemUpdate and does not implement ListApplicationRecord. Avoid nsInitialize's
+ * service-selection loop and optional control-data IPC during enumeration. */
 u32 sa_installed(s32 offset,u64 *title,char *name,size_t capacity,s32 *count) {
-    sa_persist("installed: ns init start",24);
-    Result rc=nsInitialize(); if(rc)return rc;
-    NsApplicationRecord record={0};
-    rc=nsListApplicationRecord(&record,1,offset,count);
-    if(!rc && *count) {
-        *title=record.application_id;
-        name[0]=0;
-        NsApplicationControlData *data=calloc(1,sizeof(*data));
-        if(data) {
-            u64 actual=0;
-            if(!nsGetApplicationControlData(NsApplicationControlSource_Storage,*title,data,sizeof(*data),&actual)) {
-                for(unsigned i=0;i<16;i++) if(data->nacp.lang[i].name[0]) {
-                    snprintf(name,capacity,"%.*s",(int)sizeof(data->nacp.lang[i].name),data->nacp.lang[i].name); break;
-                }
-            }
-            free(data);
-        }
+    Service root={0}, manager={0};
+    Handle handle=INVALID_HANDLE;
+    *count=0;
+    if(capacity) name[0]=0;
+    Result rc=smGetServiceOriginal(&handle,smEncodeName(hosversionBefore(3,0,0)?"ns:am":"ns:am2"));
+    sa_trace("installed-open",rc);
+    if(rc) return rc;
+    serviceCreate(&root,handle);
+    Service *session=&root;
+    if(hosversionAtLeast(3,0,0)) {
+        rc=serviceDispatch(&root,7996,.out_num_objects=1,.out_objects=&manager);
+        session=&manager;
     }
-    nsExit(); return rc;
+    NsApplicationRecord record={0};
+    if(!rc) rc=serviceDispatchInOut(session,0,offset,*count,
+        .buffer_attrs={SfBufferAttr_Out|SfBufferAttr_HipcMapAlias},
+        .buffers={{&record,sizeof(record)}});
+    if(!rc && *count) *title=record.application_id;
+    sa_trace("installed-list",rc);
+    serviceClose(&manager);
+    serviceClose(&root);
+    return rc;
 }
 u32 sa_installed_delete(u64 title) {
     Result rc=nsInitialize(); if(rc)return rc;

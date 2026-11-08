@@ -36,6 +36,17 @@ pub extern "C" fn agent_main() -> ! {
         util::sleep(5000);
     }
     sleep_guard::recover();
+    start_listener()
+}
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn agent_nro_main() -> ! {
+    // C main has initialized the console; libnx has mounted SD.
+    if unsafe { ffi::sa_init() } != 0 { util::forever(); }
+    start_listener()
+}
+#[cfg(not(test))]
+fn start_listener() -> ! {
     log::add(version());
     unsafe { ffi::sa_jobs_init(); }
     loop {

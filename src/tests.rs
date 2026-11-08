@@ -285,6 +285,7 @@ fn launch_and_quit_commands() {
             "+100123400000000",
             "0100123400000000 extra",
         ] {
+            if cmd == "quit" && arg.is_empty() { continue; }
             unsafe {
                 host_launch_result(0);
                 host_process_reset(0);
@@ -594,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.21-rs sys\r\n"),
+        ("version", "swagent-1.22-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1729,29 +1730,35 @@ mod test_transport {
 
 #[test]
 fn nro_version_and_bare_quit() {
-    use std::{io::{BufRead, BufReader}, os::unix::{io::AsRawFd, net::UnixStream}};
+    use std::{io::{BufRead, BufReader}, os::unix::{io::IntoRawFd, net::UnixStream}};
     extern "C" { fn host_edition(nro: i32); fn host_did_quit() -> i32; }
     let _guard = SERIAL.lock().unwrap();
-    setup();
-    let (server, client) = UnixStream::pair().unwrap();
-    client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
-    protocol::test_session(server.as_raw_fd());
-    unsafe { host_edition(1); }
-    let mut client = BufReader::new(client);
-    for (command, expected) in [("version", "swagent-1.21-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
-        protocol::test_receive(command);
+    for nro in [0, 1] {
+        setup();
+        let (server, client) = UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        protocol::test_session(server.into_raw_fd());
+        unsafe { host_edition(nro); }
+        let mut client = BufReader::new(client);
+        protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, expected);
+        assert_eq!(line, format!("swagent-1.22-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        protocol::test_receive("quit   ");
+        line.clear();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, "quit: ok\r\n");
+        line.clear();
+        assert_eq!(client.read_line(&mut line).unwrap(), 0);
+        assert_eq!(unsafe { host_did_quit() }, nro);
+        protocol::test_session(-1);
     }
-    assert_eq!(unsafe { host_did_quit() }, 1);
     unsafe { host_edition(0); }
-    protocol::test_session(-1);
 }
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.21-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.22-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
