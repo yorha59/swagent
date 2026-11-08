@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.29-rs sys\r\n"),
+        ("version", "swagent-1.30-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1742,14 +1742,14 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.29-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.30-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
         assert_eq!(line, "quit: ok\r\n");
         line.clear();
         assert_eq!(client.read_line(&mut line).unwrap(), 0);
-        assert_eq!(unsafe { host_did_quit() }, nro);
+        assert_eq!(unsafe { host_did_quit() }, 0);
         protocol::test_session(-1);
     }
     unsafe { host_edition(0); }
@@ -1757,7 +1757,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.29-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.30-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -2067,4 +2067,37 @@ fn nro_bind_failure_waits_five_seconds_then_takes_over() {
     assert_eq!(failed, -48);
     assert!(waited >= Duration::from_secs(5), "retry was too fast: {waited:?}");
     assert!(took_over);
+}
+
+#[test]
+fn rm_exact_file_and_guards() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::IntoRawFd, net::UnixStream}};
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.into_raw_fd());
+    let mut reader = BufReader::new(client);
+    protocol::test_file_line("put switch/rm-roundtrip 0");
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "put: ok 0\r\n");
+    std::fs::create_dir_all("build/host-sd/switch/rm-directory").unwrap();
+    for (cmd, expected) in [
+        ("rm switch/rm-roundtrip extra", "rm: error usage\r\n"),
+        ("rm", "rm: error usage\r\n"),
+        ("rm Nintendo/test", "rm: error path not allowed\r\n"),
+        ("rm switch/../test", "rm: error path not allowed\r\n"),
+        ("rm sdmc:/switch/rm-roundtrip", "rm: ok\r\n"),
+    ] {
+        protocol::test_file_line(cmd);
+        line.clear(); reader.read_line(&mut line).unwrap();
+        assert_eq!(line, expected);
+    }
+    assert!(!std::path::Path::new("build/host-sd/switch/rm-roundtrip").exists());
+    protocol::test_file_line("rm switch/rm-directory");
+    line.clear(); reader.read_line(&mut line).unwrap();
+    assert!(line.starts_with("rm: error rc="));
+    assert!(std::path::Path::new("build/host-sd/switch/rm-directory").is_dir());
+    protocol::test_session(-1);
 }

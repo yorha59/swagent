@@ -27,6 +27,7 @@ pub trait Vfs {
     fn read(&self, path: &str) -> Result<Buffer>;
     fn put(&self, path: &str, bytes: &[u8]) -> Result;
     fn mkdir(&self, path: &str) -> Result;
+    fn remove(&self, path: &str) -> Result;
     fn list(&self, path: &str, emit: &mut dyn FnMut(bool, u64, &str) -> Result) -> Result;
 }
 pub struct Sd;
@@ -47,6 +48,12 @@ impl Vfs for Sd {
         f.flush()?;
         drop(f);
         Ok(())
+    }
+    fn remove(&self, p: &str) -> Result {
+        let p = path(p, true)?;
+        crate::budget::check()?;
+        let _operation = crate::budget::Operation::new();
+        rc(unsafe { crate::ffi::sa_remove(p.c()) }, "remove file")
     }
     fn mkdir(&self, p: &str) -> Result {
         let p = path(p, true)?;
@@ -137,7 +144,7 @@ pub fn run(
     send: &mut dyn FnMut(&[u8]) -> Result,
 ) -> Result {
     let result = (|| {
-        let p = path(input, cmd == "put" || cmd == "mkdir")?;
+        let p = path(input, cmd == "put" || cmd == "mkdir" || cmd == "rm")?;
         match cmd {
             "cat" => {
                 let bytes = vfs.read(p.str())?;
@@ -158,6 +165,10 @@ pub fn run(
                 let mut line = Text::<64>::new();
                 let _ = write!(line, "put: ok {}\r\n", body.len());
                 send(line.bytes())
+            }
+            "rm" => {
+                vfs.remove(p.str())?;
+                send(b"rm: ok\r\n")
             }
             "mkdir" => {
                 vfs.mkdir(p.str())?;
@@ -221,6 +232,9 @@ mod tests {
             f.flush().map_err(err)?;
             drop(f);
             Ok(())
+        }
+        fn remove(&self, p: &str) -> Result {
+            std::fs::remove_file(self.p(p)).map_err(err)
         }
         fn mkdir(&self, p: &str) -> Result {
             std::fs::create_dir(self.p(p)).map_err(err)
@@ -365,6 +379,15 @@ mod tests {
         })
         .unwrap();
         assert!(out.starts_with(b"cat: error rc="));
+        for (input, ok) in [("switch/test", true), ("switch/sub", false),
+                            ("switch/../test", false), ("Nintendo/test", false)] {
+            out.clear();
+            run(&fs, "rm", input, &[], &mut |b| { out.extend_from_slice(b); Ok(()) }).unwrap();
+            assert_eq!(out == b"rm: ok\r\n", ok, "{input}");
+            if !ok { assert!(out.starts_with(b"rm: error ")); }
+        }
+        assert!(!root.join("switch/test").exists());
+        assert!(root.join("switch/sub").is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
