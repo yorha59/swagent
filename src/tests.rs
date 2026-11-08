@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.23-rs sys\r\n"),
+        ("version", "swagent-1.24-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -764,7 +764,7 @@ fn sleep_network_logic_and_checked_bounds() {
 }
 
 #[test]
-fn install_eagain_returns_immediately_and_preserves_download() {
+fn install_network_exhaustion_preserves_download() {
     let _guard = SERIAL.lock().unwrap();
     setup();
     unsafe extern "C" {
@@ -778,21 +778,21 @@ fn install_eagain_returns_immediately_and_preserves_download() {
     ] {
         let _ = std::fs::remove_file("build/host-sd/switch/.install.tmp.nsp");
         unsafe {
-            host_receive_fixture(response.as_ptr(), 11);
+            host_receive_fixture(response.as_ptr(), 104);
         }
         let result = install::install("http://fixture/test", 5);
-        assert_eq!(unsafe { host_fixture_connects() }, 1);
+        assert_eq!(unsafe { host_fixture_connects() }, 21);
         unsafe {
             host_receive_fixture(core::ptr::null(), 0);
         }
-        assert_eq!(result, Err(Error("network receive", 11)));
+        assert_eq!(result, Err(Error("network receive", 104)));
         assert!(!std::path::Path::new("build/host-sd/switch/.swagent_sleep_guard.bin").exists());
         assert!(!crate::net::pending());
         protocol::test_session(-1);
         protocol::test_install_error(result.unwrap_err());
         let mut logged = false;
         log::dump(1000, |s| {
-            logged |= s == b"install: error network receive rc=11"
+            logged |= s == b"install: error network receive rc=104"
         });
         assert!(logged);
         assert!(std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
@@ -936,7 +936,6 @@ fn install_http_range_resume_restart_and_complete() {
             }
         });
         let mut scratch = [0; 16];
-        assert!(http::download_install(&url, path, &mut scratch, 100).is_err());
         let size = http::download_install(&url, path, &mut scratch, 100).unwrap();
         server.join().unwrap();
         let expected: &[u8] = match code {
@@ -971,7 +970,7 @@ fn install_range_fixtures_across_commands() {
         unsafe {
             host_receive_fixture(
                 c"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc".as_ptr(),
-                11,
+                104,
             );
         }
         assert!(http::download_install(&format!("{url}/{code}"), path, &mut scratch, 100).is_err());
@@ -986,7 +985,7 @@ fn install_range_fixtures_across_commands() {
             _ => c"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
         };
         unsafe {
-            host_receive_fixture(response.as_ptr(), 11);
+            host_receive_fixture(response.as_ptr(), 104);
         }
         let result = http::download_install(&format!("{url}/{code}"), path, &mut scratch, 100);
         let request = unsafe { std::ffi::CStr::from_ptr(host_fixture_request()) }
@@ -1275,7 +1274,7 @@ fn download_hash_gate_and_restart_truncation() {
             host_reset(0);
             host_receive_fixture(
                 c"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc".as_ptr(),
-                11,
+                104,
             );
         }
         let mut lines = Vec::new();
@@ -1302,7 +1301,7 @@ fn download_hash_gate_and_restart_truncation() {
     unsafe {
         host_receive_fixture(
             c"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabcde".as_ptr(),
-            11,
+            104,
         );
     }
     assert!(http::download_install(url, path, &mut chunk, 100).is_err());
@@ -1313,7 +1312,7 @@ fn download_hash_gate_and_restart_truncation() {
         5
     );
     unsafe {
-        host_receive_fixture(c"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 5-6/7\r\n\r\nfg".as_ptr(),11);
+        host_receive_fixture(c"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 5-6/7\r\n\r\nfg".as_ptr(),104);
     }
     assert_eq!(
         http::download_install(url, path, &mut chunk, 100),
@@ -1324,7 +1323,7 @@ fn download_hash_gate_and_restart_truncation() {
         b"abcde"
     );
     unsafe {
-        host_receive_fixture(c"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n".as_ptr(), 11);
+        host_receive_fixture(c"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n".as_ptr(), 104);
     }
     assert!(http::download_install(url, path, &mut chunk, 100).is_err());
     assert_eq!(install::progress().1, 0);
@@ -1337,7 +1336,7 @@ fn download_hash_gate_and_restart_truncation() {
     unsafe {
         host_receive_fixture(
             c"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nxy".as_ptr(),
-            11,
+            104,
         );
     }
     assert_eq!(
@@ -1438,9 +1437,9 @@ fn install_hash_includes_resumed_prefix() {
         (c"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 3-5/6\r\n\r\ndeg", "install: error hash mismatch"),
     ] {
         let url=format!("http://fixture/hash-resume/{expected_line}").replace(' ',"-");
-        unsafe { host_reset(0); host_receive_fixture(c"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc".as_ptr(),11); }
+        unsafe { host_reset(0); host_receive_fixture(c"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc".as_ptr(),104); }
         assert!(http::download_install(&url,"sdmc:/switch/.install.tmp.nsp",&mut chunk,100).is_err());
-        unsafe { host_receive_fixture(suffix.as_ptr(),11); }
+        unsafe { host_receive_fixture(suffix.as_ptr(),104); }
         let mut lines=Vec::new();
         let result=install::install_checked(&url,5,Some("e80b5017098950fc58aad83c8c14978e"),&mut |line| lines.push(line.to_owned()));
         unsafe { host_receive_fixture(core::ptr::null(),0); }
@@ -1468,7 +1467,7 @@ fn full_install_hash_binary_http_transport() {
     for expected in [digest.str(), "00000000000000000000000000000000"] {
         unsafe {
             host_reset(0);
-            host_receive_bytes(response.as_ptr(), response.len(), 11);
+            host_receive_bytes(response.as_ptr(), response.len(), 104);
         }
         let mut lines = Vec::new();
         let result = install::install_checked(
@@ -1743,7 +1742,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.23-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.24-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1758,7 +1757,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.23-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.24-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -1891,4 +1890,111 @@ fn put_one_megabyte_wire_roundtrip() {
     drop(reader);
     worker.join().unwrap();
     unsafe { ffi::close(listener); host_listener_fixture(0, -1, 0); }
+}
+
+#[test]
+fn receive_transient_storm_mid_body_succeeds() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    unsafe extern "C" {
+        fn host_receive_fixture(p: *const core::ffi::c_char, error: i32);
+        fn host_receive_storm(at: usize, count: i32);
+        fn host_fixture_connects() -> i32;
+    }
+    let header = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n";
+    let response = std::ffi::CString::new(format!("{header}abcdef")).unwrap();
+    unsafe {
+        host_receive_fixture(response.as_ptr(), 104);
+        host_receive_storm(header.len()+3, 100);
+    }
+    let mut chunk = [0;3];
+    let result = http::download_install("http://fixture/storm", "sdmc:/switch/storm", &mut chunk, 100);
+    let connects = unsafe { host_fixture_connects() };
+    unsafe { host_receive_fixture(core::ptr::null(), 0); }
+    assert_eq!(result, Ok(6));
+    assert_eq!(connects, 1);
+    assert_eq!(std::fs::read("build/host-sd/switch/storm").unwrap(), b"abcdef");
+}
+
+#[test]
+fn reset_at_half_reconnects_with_range() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    unsafe extern "C" {
+        fn host_receive_fixture(p: *const core::ffi::c_char, error: i32);
+        fn host_reconnect_fixture(p: *const core::ffi::c_char);
+        fn host_fixture_request() -> *const core::ffi::c_char;
+        fn host_fixture_connects() -> i32;
+    }
+    unsafe {
+        host_receive_fixture(c"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc".as_ptr(),104);
+        host_reconnect_fixture(c"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 3-5/6\r\n\r\ndef".as_ptr());
+    }
+    let result = http::download_install("http://fixture/reset-half", "sdmc:/switch/reset-half", &mut [0;3], 100);
+    let request = unsafe { std::ffi::CStr::from_ptr(host_fixture_request()) }.to_str().unwrap().to_owned();
+    let connects = unsafe { host_fixture_connects() };
+    unsafe { host_reconnect_fixture(core::ptr::null()); host_receive_fixture(core::ptr::null(),0); }
+    assert_eq!(result, Ok(6));
+    assert_eq!(connects,2);
+    assert!(request.contains("Range: bytes=3-\r\n"));
+    assert_eq!(std::fs::read("build/host-sd/switch/reset-half").unwrap(),b"abcdef");
+}
+
+#[test]
+fn failed_install_keeps_partial_and_second_install_resumes() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    unsafe extern "C" {
+        fn host_receive_bytes(p: *const u8, n: usize, error: i32);
+        fn host_fixture_request() -> *const core::ffi::c_char;
+    }
+    let body = package();
+    let prefix = 100;
+    let mut first = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",body.len()).into_bytes();
+    first.extend_from_slice(&body[..prefix]);
+    unsafe { host_reset(0); host_receive_bytes(first.as_ptr(),first.len(),104); }
+    let failed = install::install("http://fixture/install-twice",5);
+    unsafe { host_receive_bytes(core::ptr::null(),0,0); }
+    assert_eq!(failed,Err(Error("network receive",104)));
+    assert_eq!(std::fs::read("build/host-sd/switch/.install.tmp.nsp").unwrap(),body[..prefix]);
+    let mut second = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\n\r\n",body.len()-prefix,prefix,body.len()-1,body.len()).into_bytes();
+    second.extend_from_slice(&body[prefix..]);
+    unsafe { host_receive_bytes(second.as_ptr(),second.len(),104); }
+    let completed = install::install("http://fixture/install-twice",5);
+    let request = unsafe { std::ffi::CStr::from_ptr(host_fixture_request()) }.to_str().unwrap().to_owned();
+    unsafe { host_receive_bytes(core::ptr::null(),0,0); }
+    assert!(completed.is_ok(),"{completed:?}");
+    assert!(request.contains("Range: bytes=100-\r\n"));
+    assert!(!std::path::Path::new("build/host-sd/switch/.install.tmp.nsp").exists());
+}
+
+#[test]
+fn transient_receive_stall_keeps_install_prefix() {
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    unsafe extern "C" {
+        fn host_receive_fixture(p: *const core::ffi::c_char, error: i32);
+        fn host_receive_storm(at: usize, count: i32);
+        fn host_receive_step(ms: u64);
+        fn host_clock_offset(ms: u64);
+    }
+    let header = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n";
+    let response = std::ffi::CString::new(format!("{header}abcdef")).unwrap();
+    unsafe {
+        host_clock_offset(0);
+        host_receive_fixture(response.as_ptr(),104);
+        host_receive_storm(header.len()+3,100);
+        host_receive_step(1000);
+    }
+    budget::begin();
+    let result = http::download_install("http://fixture/stalled", "sdmc:/switch/stalled", &mut [0;3],100);
+    budget::end();
+    unsafe {
+        host_receive_storm(0,0);
+        host_receive_step(0);
+        host_clock_offset(0);
+        host_receive_fixture(core::ptr::null(),0);
+    }
+    assert_eq!(result,Err(Error("operation wall-clock budget",110)));
+    assert_eq!(std::fs::read("build/host-sd/switch/stalled").unwrap(),b"abc");
 }

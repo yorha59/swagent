@@ -52,7 +52,28 @@ pub fn download_install(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> 
             Ok(mut f) => f.size()?,
             Err(_) => 0,
         };
-        download_inner(url, path, chunk, limit, true, offset, expected)
+        let mut offset = offset;
+        for attempt in 0..=20 {
+            crate::budget::check()?;
+            if offset > 0 {
+                let mut line = Text::<96>::new();
+                let _ = write!(line, "resuming from {} bytes", offset);
+                crate::log::add(line.str());
+            }
+            let result = download_inner(url, path, chunk, limit, true, offset, expected);
+            match result {
+                Err(e) if e.0 == "HTTP connect" && attempt == 0 => return Err(e),
+                Err(e) if matches!(e.0, "network receive" | "HTTP connect" | "network send" | "short HTTP header" | "truncated HTTP body" | "short HTTP chunk" | "short chunk header" | "short chunk delimiter" | "truncated HTTP trailers") => {
+                    if attempt == 20 { return Err(Error("network receive", e.1)); }
+                    let mut line = Text::<128>::new();
+                    let _ = write!(line, "download reconnect attempt={} rc={}", attempt + 1, e.1);
+                    crate::log::add(line.str());
+                    offset = File::open(path, false)?.size()?;
+                }
+                other => return other,
+            }
+        }
+        unreachable!()
     })
 }
 

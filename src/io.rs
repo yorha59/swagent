@@ -162,8 +162,7 @@ impl Socket {
             });
             match result {
                 Err(Error("network receive", e))
-                    if crate::net::transient(e as i32)
-                        && unsafe { ffi::sa_nonblocking(self.0) } != 0 =>
+                    if crate::net::transient(e as i32) =>
                 {
                     crate::budget::check()?;
                     if now_ms() >= deadline {
