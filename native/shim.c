@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.25-rs"; }
+const char *sa_version(void) { return "swagent-1.26-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -48,6 +48,8 @@ extern void agent_nro_main(void);
 static atomic_bool nro_listening;
 static void nro_agent(void *arg) { (void)arg; agent_nro_main(); }
 int main(void) {
+    /* Must be the first call: stdout uses the software console framebuffer.
+     * Printing before consoleInit causes ConsoleSwRenderer_drawChar to abort. */
     consoleInit(NULL);
     /* SD is mounted by the standard libnx __appInit before main. */
     PadState pad;

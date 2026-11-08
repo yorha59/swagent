@@ -313,3 +313,11 @@ Content writing logs `install: writing contents pct=N` at every 5% threshold
 (including confirmed contents already present). Host regression coverage runs
 the disk installer with simulated 200 ms writes for over ten grace windows,
 and verifies a stalled write still expires.
+
+
+Version 1.26 (`swagent-1.26-rs`) preserves `consoleInit(NULL)` as the very
+first NRO entry call, before output or worker startup. The checked-in entry
+already had this order; regression checks now enforce it in the preprocessed
+NRO source and linked entry point. Printing before console initialization can
+crash in `ConsoleSwRenderer_drawChar` with a NULL framebuffer. The hbmenu
+console continues to display the LAN IP and port 6000.
