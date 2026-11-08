@@ -38,7 +38,7 @@ impl File {
         if n != p.len() as u64 {
             Err(Error("short file read", 0))
         } else {
-            Ok(())
+            crate::budget::progress()
         }
     }
     pub fn write(&mut self, off: u64, p: &[u8]) -> Result {
@@ -49,7 +49,8 @@ impl File {
                 ffi::fsFileWrite(&mut self.0, off as i64, p.as_ptr(), p.len() as u64, 0)
             },
             "write file",
-        )
+        )?;
+        crate::budget::progress()
     }
     pub fn flush(&mut self) -> Result {
         crate::budget::check()?;
@@ -155,6 +156,7 @@ impl Socket {
                 } else if n as usize > p.len() {
                     Err(Error("invalid receive length", 0))
                 } else {
+                    if n > 0 { crate::budget::progress()?; }
                     Ok(n as usize)
                 }
             });
@@ -196,6 +198,7 @@ impl Socket {
                     };
                     Err(Error("network send", e as u32))
                 } else {
+                    if n > 0 { crate::budget::progress()?; }
                     Ok(n as usize)
                 }
             });
