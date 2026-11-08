@@ -106,9 +106,13 @@ pub fn file(path: &str, chunk: &mut [u8], limit: u64) -> Result<Text<33>> {
     let mut hash = Md5::new();
     let mut at = 0;
     while at < size {
-        let n = (size - at).min(chunk.len() as u64) as usize;
+        let n = (size - at).min(chunk.len() as u64).min(64 * 1024 * 1024) as usize;
         f.read(at, &mut chunk[..n])?;
-        hash.update(&chunk[..n]);
+        // Hash bounded pieces so CPU validation also reports completed work.
+        for block in chunk[..n].chunks(1024 * 1024) {
+            hash.update(block);
+            crate::budget::progress()?;
+        }
         at += n as u64;
         if crate::retiring() {
             return Err(Error("retired", 0));

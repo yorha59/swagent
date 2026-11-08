@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.24-rs sys\r\n"),
+        ("version", "swagent-1.25-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1742,7 +1742,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.24-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.25-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1757,7 +1757,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.24-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.25-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -1997,4 +1997,45 @@ fn transient_receive_stall_keeps_install_prefix() {
     }
     assert_eq!(result,Err(Error("operation wall-clock budget",110)));
     assert_eq!(std::fs::read("build/host-sd/switch/stalled").unwrap(),b"abc");
+}
+
+#[test]
+fn install_writes_renew_budget_past_ten_grace_windows_and_stall_expires() {
+    unsafe extern "C" {
+        fn host_install_write_step(ms: u64);
+        fn host_install_write_elapsed() -> u64;
+        fn host_clock_offset(ms: u64);
+    }
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    unsafe { host_reset(0); host_clock_offset(0); host_install_write_step(200); }
+    std::fs::write("build/host-sd/switch/.install.tmp.nsp", package()).unwrap();
+    // Exercise extraction, SYSTEM staging and NCM writes without a download.
+    let mut chunk = vec![0; 2048];
+    budget::begin();
+    let result = install::install_downloaded(5, &mut chunk);
+    let elapsed = unsafe { host_install_write_elapsed() };
+    let expired = budget::expired();
+    budget::end();
+    unsafe { host_install_write_step(0); host_clock_offset(0); }
+    assert_eq!(result, Ok(0x0100123400000000));
+    assert!(elapsed > 10 * budget::GRACE_MS);
+    assert!(!expired);
+    let mut percentages = Vec::new();
+    log::dump(1000, |line| {
+        if let Some(pct) = line.strip_prefix(b"install: writing contents pct=") {
+            percentages.push(std::str::from_utf8(pct).unwrap().parse::<u32>().unwrap());
+        }
+    });
+    assert!(percentages.ends_with(&(0..=100).step_by(5).collect::<Vec<_>>()));
+
+    std::fs::write("build/host-sd/switch/.install.tmp.nsp", package()).unwrap();
+    unsafe { host_reset(0); host_install_write_step(budget::GRACE_MS + 1); }
+    budget::begin();
+    let result = install::install_downloaded(5, &mut chunk);
+    let expired = budget::expired();
+    budget::end();
+    unsafe { host_install_write_step(0); host_clock_offset(0); }
+    assert_eq!(result, Err(Error("operation wall-clock budget", 110)));
+    assert!(expired);
 }
