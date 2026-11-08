@@ -3,6 +3,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -10,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <stdatomic.h>
 typedef struct {uint32_t fd,rest[3];} Service;
 static void path(const char *p,char *out) {
     if(p[0]=='/'){snprintf(out,1024,"%s",p);return;}
@@ -35,9 +37,15 @@ ssize_t sa_recv(int fd,void *p,size_t n,int flags){
 }
 ssize_t sa_send(int fd,const void *p,size_t n,int flags){if(receive_fixture){size_t len=n<sizeof(fixture_request)-1?n:sizeof(fixture_request)-1;memcpy(fixture_request,p,len);fixture_request[len]=0;return n;}return send(fd,p,n,flags);}
 int sa_errno(void){return errno;}
+static atomic_int connect_blocked,connect_entered;
+void host_connect_block(int block){atomic_store(&connect_blocked,block);if(block)atomic_store(&connect_entered,0);}
+int host_connect_entered(void){return atomic_load(&connect_entered);}
+extern int host_test_connect(uint16_t port);
 int sa_connect(const char *host,const char *port){
+    if(atomic_load(&connect_blocked)){atomic_store(&connect_entered,1);while(atomic_load(&connect_blocked))usleep(1000);errno=ECONNREFUSED;return -1;}
     if(connect_failure){errno=connect_failure;return -1;}
     if(receive_fixture){fixture_connects++;receive_offset=0;return open("/dev/null",O_RDONLY);}
+    if(!strcmp(host,"127.0.0.1")){int fd=host_test_connect((uint16_t)atoi(port));if(fd<0)errno=ECONNREFUSED;return fd;}
     struct addrinfo hints={.ai_family=AF_INET,.ai_socktype=SOCK_STREAM},*ai=NULL;
     if(getaddrinfo(host,port,&hints,&ai))return -1;
     int fd=socket(AF_INET,SOCK_STREAM,0);int rc=connect(fd,ai->ai_addr,ai->ai_addrlen);
@@ -161,3 +169,19 @@ void sa_timeout(int fd,int seconds) {
     setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t));
     setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&t,sizeof(t));
 }
+
+#include <time.h>
+static atomic_uint_fast64_t clock_offset;
+void host_clock_offset(uint64_t ms){atomic_store(&clock_offset,ms);}
+uint64_t sa_now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000+atomic_load(&clock_offset); }
+static _Thread_local int mock_listen_errno;
+void host_listen_failure(int error){mock_listen_errno=error;}
+static _Thread_local int mock_listener, mock_accept=-1, mock_accept_errno;
+void host_listener_fixture(int enabled,int client,int error) { mock_listener=enabled; mock_accept=client; mock_accept_errno=error; }
+int sa_listen(void) { if(mock_listen_errno)return -mock_listen_errno; if(mock_listener)return open("/dev/null",O_RDONLY); int fd=socket(AF_INET,SOCK_STREAM,0),one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one)); struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(6000),.sin_addr={htonl(INADDR_LOOPBACK)}}; if(bind(fd,(void*)&a,sizeof(a))||listen(fd,4)){int e=errno;close(fd);return -e;} fcntl(fd,F_SETFL,O_NONBLOCK);return fd; }
+int sa_accept(int fd) { if(mock_listener) { if(mock_accept<0) { errno=mock_accept_errno;return -1; } int client=mock_accept;mock_accept=-1;fcntl(client,F_SETFL,O_NONBLOCK);return client; } return accept(fd,NULL,NULL); }
+
+#include <pthread.h>
+uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
+
+int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }

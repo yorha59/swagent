@@ -14,7 +14,14 @@ struct Session {
     fd: i32,
     id: u64,
 }
-static SESSION: Lock<Session> = Lock::new(Session { fd: -1, id: 0 });
+const CLIENTS: usize = 4;
+static SESSIONS: [Lock<Session>; CLIENTS] =
+    [const { Lock::new(Session { fd: -1, id: 0 }) }; CLIENTS];
+fn session(id: u64) -> &'static Lock<Session> {
+    &SESSIONS[id as usize % CLIENTS]
+}
+static NEXT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(4);
+static CLIENT_READY: [AtomicBool; CLIENTS] = [const { AtomicBool::new(false) }; CLIENTS];
 #[derive(Clone, Copy)]
 struct Job {
     id: u64,
@@ -97,7 +104,7 @@ pub fn retiring() -> bool {
     RETIRING.load(Acquire)
 }
 pub fn reply(id: u64, line: &[u8]) -> Result {
-    SESSION.with(|s| {
+    session(id).with(|s| {
         if s.id != id || s.fd < 0 {
             return Err(Error("client disconnected", 0));
         }
@@ -119,7 +126,7 @@ fn enqueue(id: u64, line: Text<512>) {
     }
 }
 fn active(id: u64) -> bool {
-    SESSION.with(|s| s.id == id && s.fd >= 0)
+    session(id).with(|s| s.id == id && s.fd >= 0)
 }
 pub extern "C" fn worker(_: *mut core::ffi::c_void) {
     loop {
@@ -236,13 +243,84 @@ fn sleep_settings(state: Option<bool>) -> Result<ffi::SleepSettings> {
     }
     Ok(settings)
 }
+struct JobState {
+    id: u64,
+    deadline: u64,
+    timed_out: bool,
+    install: bool,
+}
+static JOB_STATE: Lock<JobState> = Lock::new(JobState {
+    id: 0,
+    deadline: 0,
+    timed_out: false,
+    install: false,
+});
+pub extern "C" fn watchdog(_: *mut core::ffi::c_void) {
+    loop {
+        check_budget();
+        sleep(20);
+    }
+}
+pub(crate) fn check_budget() {
+    let expired = JOB_STATE.with(|job| {
+        if job.deadline == 0 || job.timed_out {
+            return None;
+        }
+        if now_ms() < job.deadline && !crate::budget::expired() {
+            return None;
+        }
+        job.timed_out = true;
+        crate::budget::cancel();
+        Some((job.id, job.install))
+    });
+    if let Some((id, install)) = expired {
+        log::add("worker: wall-clock budget expired; lane quarantined until return");
+        error(
+            id,
+            if install { "install" } else { "command" },
+            Error("wall-clock budget", 110),
+        );
+    }
+}
 fn execute(job: Job) {
+    JOB_STATE.with(|state| {
+        crate::budget::begin();
+        *state = JobState {
+            id: job.id,
+            // Absolute ceiling, independent of byte progress and retry count.
+            deadline: now_ms() + 30 * 60 * 1000,
+            timed_out: false,
+            install: job.line.str().split_ascii_whitespace().next() == Some("install"),
+        };
+    });
+    execute_inner(job);
+    JOB_STATE.with(|state| {
+        state.deadline = 0;
+        crate::budget::end();
+    });
+}
+fn execute_inner(job: Job) {
     let id = job.id;
     let mut words = job.line.str().split_ascii_whitespace();
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
-            "wifi" => crate::wifi::command(id, job.line.str().trim_start().strip_prefix("wifi").unwrap_or("").trim())?,
+            "update" => {
+                let url = words.next().ok_or(Error("usage: update URL", 0))?;
+                if words.next().is_some() {
+                    return Err(Error("usage: update URL", 0));
+                }
+                update(id, url)?;
+            }
+            "wifi" => crate::wifi::command(
+                id,
+                job.line
+                    .str()
+                    .trim_start()
+                    .strip_prefix("wifi")
+                    .unwrap_or("")
+                    .trim(),
+            )?,
             "power" => {
                 // Always queued; telemetry and failures do not enter the ring log.
                 let mut s = Text::<256>::new();
@@ -251,7 +329,9 @@ fn execute(job: Job) {
                 } else {
                     match crate::power::read() {
                         Ok(value) => s = value,
-                        Err(e) => { let _ = write!(s, "power: error {} rc={}", e.0, e.1); }
+                        Err(e) => {
+                            let _ = write!(s, "power: error {} rc={}", e.0, e.1);
+                        }
                     }
                 }
                 let _ = reply(id, s.bytes());
@@ -481,7 +561,9 @@ fn execute(job: Job) {
         Ok(())
     })();
     if let Err(e) = result {
-        error(id, cmd, e)
+        if !JOB_STATE.with(|state| state.timed_out) {
+            error(id, cmd, e)
+        }
     }
 }
 const DEST: &str = "sdmc:/atmosphere/contents/430000000000000B/exefs.nsp";
@@ -566,7 +648,7 @@ fn update(id: u64, url: &str) -> Result {
         }
     }
     let _ = reply(id, b"update: ok");
-    disconnect();
+    disconnect(id);
     sleep(500);
     loop {
         let mut pid = 0;
@@ -586,9 +668,9 @@ fn update(id: u64, url: &str) -> Result {
         sleep(1000);
     }
 }
-fn disconnect() {
-    SESSION.with(|s| {
-        if s.fd >= 0 {
+fn disconnect(id: u64) {
+    session(id).with(|s| {
+        if s.id == id && s.fd >= 0 {
             unsafe {
                 ffi::shutdown(s.fd, 2);
                 ffi::close(s.fd);
@@ -626,23 +708,16 @@ fn receive(id: u64, line: Text<512>) {
             let _ = reply(id, s.bytes());
         }
         Some("version") if words.next().is_none() => {
-            let _ = reply(id, b"swagent-1.15-rs");
-        }
-        Some("update") => {
-            let result = match (words.next(), words.next()) {
-                (Some(url), None) => update(id, url),
-                _ => Err(Error("usage: update URL", 0)),
-            };
-            if let Err(e) = result {
-                error(id, "update", e)
-            }
+            let _ = reply(id, b"swagent-1.16-rs");
         }
         _ => enqueue(id, line),
     }
 }
 fn file_reply(id: u64, cmd: &str, path: &str, body: &[u8]) {
-    let _ = SESSION.with(|s| {
-        if s.id != id || s.fd < 0 { return Err(Error("disconnected", 0)); }
+    let _ = session(id).with(|s| {
+        if s.id != id || s.fd < 0 {
+            return Err(Error("disconnected", 0));
+        }
         let sock = core::mem::ManuallyDrop::new(Socket::new(s.fd));
         crate::files::run(&crate::files::Sd, cmd, path, body, &mut |b| sock.send(b))
     });
@@ -664,7 +739,9 @@ impl Upload {
         self.used += 1;
         if self.buffered == self.bytes.len() || self.used == self.size {
             self.file.as_mut().unwrap().write(
-                self.used - self.buffered as u64, &self.bytes[..self.buffered])?;
+                self.used - self.buffered as u64,
+                &self.bytes[..self.buffered],
+            )?;
             self.buffered = 0;
         }
         if self.used == self.size {
@@ -678,33 +755,48 @@ impl Upload {
 impl Drop for Upload {
     fn drop(&mut self) {
         self.file.take();
-        if !self.complete { io::remove(self.path.str()); }
+        if !self.complete {
+            io::remove(self.path.str());
+        }
     }
 }
 fn put_size(input: &str) -> Result<u64> {
     let n = input.parse::<u64>().map_err(|_| Error("usage", 0))?;
-    if n > PUT_LIMIT { return Err(Error("size limit", PUT_LIMIT as u32)); }
+    if n > PUT_LIMIT {
+        return Err(Error("size limit", PUT_LIMIT as u32));
+    }
     Ok(n)
 }
 fn file_error(id: u64, cmd: &str, e: Error) {
     let mut msg = Text::<128>::new();
     let _ = write!(msg, "{}: error {}", cmd, e.0);
-    if e.0 == "size limit" { let _ = write!(msg, " {}", e.1); }
+    if e.0 == "size limit" {
+        let _ = write!(msg, " {}", e.1);
+    }
     let _ = reply(id, msg.bytes());
 }
 fn file_line(id: u64, line: &str) -> Result<Option<Upload>> {
     let mut words = line.split_ascii_whitespace();
     let cmd = words.next().unwrap_or("");
-    let Some(path) = words.next() else { return Err(Error("usage", 0)); };
+    let Some(path) = words.next() else {
+        return Err(Error("usage", 0));
+    };
     if cmd == "put" {
         // Invalid uploads close the connection: their unconsumed body must never
         // be interpreted as commands.
         let n = put_size(words.next().ok_or(Error("usage", 0))?)?;
-        if words.next().is_some() { return Err(Error("usage", 0)); }
+        if words.next().is_some() {
+            return Err(Error("usage", 0));
+        }
         let p = crate::files::path(path, true)?;
         let mut upload = Upload {
-            file: Some(File::open(p.str(), true)?), path: p,
-            bytes: [0; 512], buffered: 0, used: 0, size: n, complete: false,
+            file: Some(File::open(p.str(), true)?),
+            path: p,
+            bytes: [0; 512],
+            buffered: 0,
+            used: 0,
+            size: n,
+            complete: false,
         };
         if n == 0 {
             upload.file.as_mut().unwrap().flush()?;
@@ -715,130 +807,186 @@ fn file_line(id: u64, line: &str) -> Result<Option<Upload>> {
         }
         Ok(Some(upload))
     } else {
-        if words.next().is_some() { return Err(Error("usage", 0)); }
+        if words.next().is_some() {
+            return Err(Error("usage", 0));
+        }
         file_reply(id, cmd, path, &[]);
         Ok(None)
     }
 }
+// Persistent client lanes: no per-connection allocation or unreaped threads.
+// The accept thread never reads commands or touches a file.
+pub extern "C" fn client_worker(arg: *mut core::ffi::c_void) {
+    let slot = arg as usize;
+    loop {
+        if !CLIENT_READY[slot].load(Acquire) {
+            sleep(5);
+            continue;
+        }
+        let (fd, id) = SESSIONS[slot].with(|s| (s.fd, s.id));
+        client_loop(fd, id);
+        CLIENT_READY[slot].store(false, Release);
+    }
+}
+fn client_loop(fd: i32, id: u64) {
+    let mut frame = Frame::new();
+    let mut upload: Option<Upload> = None;
+    let mut last_input = now_ms();
+    'client: loop {
+        if upload.is_some() && now_ms() - last_input >= 30_000 {
+            let _ = reply(id, b"put: error timeout/short read");
+            break;
+        }
+        let mut input = [0; 512];
+        // Every body receive is bounded, independently of header framing.
+        unsafe {
+            ffi::sa_timeout(fd, if upload.is_some() { 30 } else { 2 });
+        }
+        let n = unsafe { ffi::sa_recv(fd, input.as_mut_ptr(), input.len(), 0) };
+        if n == 0 {
+            if upload.is_some() {
+                let _ = reply(id, b"put: error timeout/short read");
+            }
+            break;
+        }
+        if crate::net::pending() {
+            break;
+        }
+        if n < 0 {
+            let e = unsafe { ffi::sa_errno() };
+            if crate::net::transient(e) {
+                sleep(10);
+                continue;
+            }
+            log::add("client: receive failed");
+            break;
+        }
+        let Some(input) = input.get(..n as usize) else {
+            break;
+        };
+        last_input = now_ms();
+        for byte in input {
+            if let Some(u) = upload.as_mut() {
+                match u.push(*byte) {
+                    Ok(true) => {
+                        let mut msg = Text::<64>::new();
+                        let _ = write!(msg, "put: ok {}", u.used);
+                        let _ = reply(id, msg.bytes());
+                        upload = None;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        file_error(id, "put", e);
+                        break 'client;
+                    }
+                }
+                continue;
+            }
+            if let Some(result) = frame.feed(*byte) {
+                match result {
+                    Ok(line) if line.len > 0 => {
+                        let cmd = line.str().split_ascii_whitespace().next().unwrap_or("");
+                        if matches!(cmd, "put" | "cat" | "ls" | "mkdir") {
+                            match file_line(id, line.str()) {
+                                Ok(u) => upload = u,
+                                Err(e) => {
+                                    file_error(id, cmd, e);
+                                    if cmd == "put" {
+                                        break 'client;
+                                    }
+                                }
+                            }
+                        } else {
+                            receive(id, line);
+                        }
+                    }
+                    Err(_) => {
+                        let _ = reply(id, b"error: invalid or oversized line");
+                    }
+                    _ => {}
+                }
+            }
+            if retiring() {
+                break 'client;
+            }
+        }
+    }
+    drop(upload); // Close and delete partial uploads before accepting another client.
+    disconnect(id);
+    log::add("client disconnected");
+}
+fn admit(fd: i32) -> bool {
+    for slot in 0..CLIENTS {
+        if CLIENT_READY[slot].load(Acquire) {
+            continue;
+        }
+        let id = NEXT_ID.fetch_add(CLIENTS as u64, AcqRel) + slot as u64;
+        SESSIONS[slot].with(|s| {
+            s.fd = fd;
+            s.id = id;
+        });
+        CLIENT_READY[slot].store(true, Release);
+        log::add("client connected");
+        return true;
+    }
+    false
+}
+fn listener_step(server: i32) -> bool {
+    let fd = unsafe { ffi::sa_accept(server) };
+    if fd < 0 {
+        let e = unsafe { ffi::sa_errno() };
+        if crate::net::transient(e) {
+            sleep(20);
+            return true;
+        }
+        let mut line = Text::<96>::new();
+        let _ = write!(line, "listener: accept failed errno={e}; recreating");
+        log::add(line.str());
+        return false;
+    }
+    unsafe {
+        ffi::sa_timeout(fd, 2);
+    }
+    if !admit(fd) {
+        // Capacity is fixed. Do not wait behind an occupied client lane.
+        unsafe {
+            ffi::sa_send(fd, b"error: busy\r\n".as_ptr(), 13, 0);
+            ffi::close(fd);
+        }
+        log::add("listener: client capacity reached");
+    }
+    true
+}
+fn serve_step(server: &mut i32) {
+    if *server < 0 {
+        *server = unsafe { ffi::sa_listen() };
+        if *server < 0 {
+            let mut line = Text::<96>::new();
+            let _ = write!(line, "listener: listen failed errno={}; retrying", -*server);
+            log::add(line.str());
+            sleep(250);
+            return;
+        }
+        LISTENER.store(*server, Release);
+        log::add("listening :6000");
+    }
+    if !listener_step(*server) {
+        LISTENER.store(-1, Release);
+        unsafe {
+            ffi::close(*server);
+        }
+        *server = -1;
+        log::add("listener: closed; recreating");
+        sleep(100);
+    }
+}
 pub fn serve() -> ! {
+    let mut server = -1;
     loop {
         if retiring() {
             forever()
         }
-        let server = unsafe { ffi::sa_listen() };
-        if server < 0 {
-            crate::net::failed(-server);
-            crate::net::recover();
-            sleep(5000);
-            continue;
-        }
-        unsafe {
-            ffi::sa_timeout(server, 2);
-        }
-        LISTENER.store(server, Release);
-        log::add("listening :6000");
-        loop {
-            if crate::net::pending() {
-                break;
-            }
-            let fd = unsafe { ffi::sa_accept(server) };
-            if fd < 0 {
-                let e = unsafe { ffi::sa_errno() };
-                if crate::net::transient(e) {
-                    sleep(100);
-                    continue;
-                }
-                crate::net::failed(e);
-                break;
-            }
-            unsafe {
-                ffi::sa_timeout(fd, 2);
-            }
-            let id = SESSION.with(|s| {
-                s.id = s.id.wrapping_add(1);
-                s.fd = fd;
-                s.id
-            });
-            log::add("client connected");
-            let mut frame = Frame::new();
-            let mut upload: Option<Upload> = None;
-            'client: loop {
-                let mut input = [0; 512];
-                // Every body receive is bounded, independently of header framing.
-                unsafe { ffi::sa_timeout(fd, if upload.is_some() { 30 } else { 2 }); }
-                let n = unsafe { ffi::sa_recv(fd, input.as_mut_ptr(), input.len(), 0) };
-                if n == 0 {
-                    if upload.is_some() { let _ = reply(id, b"put: error timeout/short read"); }
-                    break;
-                }
-                if crate::net::pending() {
-                    break;
-                }
-                if n < 0 {
-                    let e = unsafe { ffi::sa_errno() };
-                    if upload.is_some() {
-                        let _ = reply(id, b"put: error timeout/short read");
-                        break;
-                    }
-                    if crate::net::transient(e) { continue; }
-                    crate::net::failed(e);
-                    break;
-                }
-                let Some(input) = input.get(..n as usize) else {
-                    break;
-                };
-                for byte in input {
-                    if let Some(u) = upload.as_mut() {
-                        match u.push(*byte) {
-                            Ok(true) => {
-                                let mut msg = Text::<64>::new();
-                                let _ = write!(msg, "put: ok {}", u.used);
-                                let _ = reply(id, msg.bytes());
-                                upload = None;
-                            }
-                            Ok(false) => {}
-                            Err(e) => { file_error(id, "put", e); break 'client; }
-                        }
-                        continue;
-                    }
-                    if let Some(result) = frame.feed(*byte) {
-                        match result {
-                            Ok(line) if line.len > 0 => {
-                                let cmd = line.str().split_ascii_whitespace().next().unwrap_or("");
-                                if matches!(cmd, "put" | "cat" | "ls" | "mkdir") {
-                                    match file_line(id, line.str()) {
-                                        Ok(u) => upload = u,
-                                        Err(e) => {
-                                            file_error(id, cmd, e);
-                                            if cmd == "put" { break 'client; }
-                                        }
-                                    }
-                                } else { receive(id, line); }
-                            },
-                            Err(_) => {
-                                let _ = reply(id, b"error: invalid or oversized line");
-                            }
-                            _ => {}
-                        }
-                    }
-                    if retiring() {
-                        break 'client;
-                    }
-                }
-            }
-            drop(upload); // Close and delete partial uploads before accepting another client.
-            disconnect();
-            log::add("client disconnected");
-            if crate::net::pending() {
-                break;
-            }
-        }
-        LISTENER.store(-1, Release);
-        unsafe {
-            ffi::close(server);
-        }
-        crate::net::recover();
-        sleep(1000);
+        serve_step(&mut server);
     }
 }
 
@@ -873,7 +1021,8 @@ pub fn test_queue() {
 
 #[cfg(test)]
 pub fn test_session(fd: i32) {
-    SESSION.with(|s| {
+    let id = 42;
+    session(id).with(|s| {
         s.fd = fd;
         s.id = 42;
     });
@@ -907,20 +1056,30 @@ mod upload_tests {
     fn rejects_oversized_put_before_open_or_allocation() {
         assert_eq!(put_size("268435456"), Ok(PUT_LIMIT));
         for n in ["268435457", "2147483648", "18446744073709551615"] {
-            assert!(matches!(file_line(0, &std::format!("put switch/test {n}")),
-                Err(Error("size limit", 268435456))));
+            assert!(matches!(
+                file_line(0, &std::format!("put switch/test {n}")),
+                Err(Error("size limit", 268435456))
+            ));
         }
     }
     #[test]
     fn partial_upload_is_deleted() {
-        let path = std::env::temp_dir().join(std::format!("swagent-partial-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(std::format!("swagent-partial-{}", std::process::id()));
         let mut p = Text::new();
         p.push(path.to_str().unwrap().as_bytes()).unwrap();
         let mut u = Upload {
-            file: Some(File::open(p.str(), true).unwrap()), path: p,
-            bytes: [0; 512], buffered: 0, used: 0, size: 1024, complete: false,
+            file: Some(File::open(p.str(), true).unwrap()),
+            path: p,
+            bytes: [0; 512],
+            buffered: 0,
+            used: 0,
+            size: 1024,
+            complete: false,
         };
-        for _ in 0..512 { assert!(!u.push(1).unwrap()); }
+        for _ in 0..512 {
+            assert!(!u.push(1).unwrap());
+        }
         assert!(path.exists());
         drop(u);
         assert!(!path.exists());
@@ -929,5 +1088,24 @@ mod upload_tests {
 
 #[cfg(test)]
 pub fn test_file_line(line: &str) {
-    if let Err(e) = file_line(42, line) { file_error(42, "put", e); }
+    if let Err(e) = file_line(42, line) {
+        file_error(42, "put", e);
+    }
+}
+
+#[cfg(test)]
+pub fn test_listener_step(fd: i32) -> bool {
+    listener_step(fd)
+}
+#[cfg(test)]
+pub fn test_client_once(slot: usize) {
+    assert!(CLIENT_READY[slot].load(Acquire));
+    let (fd, id) = SESSIONS[slot].with(|s| (s.fd, s.id));
+    client_loop(fd, id);
+    CLIENT_READY[slot].store(false, Release);
+}
+
+#[cfg(test)]
+pub fn test_serve_step(server: &mut i32) {
+    serve_step(server);
 }

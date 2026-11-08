@@ -35,7 +35,13 @@ extern "C" {
     pub fn sa_wifi(join: u32, profile: *const u8, records: *mut u8, count: *mut i32) -> u32;
     pub fn sa_mkdir(p: *const c_char) -> u32;
     pub fn sa_dir_open(p: *const c_char, out: *mut Service) -> u32;
-    pub fn sa_dir_read(d: *mut Service, name: *mut u8, size: *mut u64, kind: *mut i32, count: *mut i64) -> u32;
+    pub fn sa_dir_read(
+        d: *mut Service,
+        name: *mut u8,
+        size: *mut u64,
+        kind: *mut i32,
+        count: *mut i64,
+    ) -> u32;
     pub fn fsDirClose(d: *mut Service);
     pub fn sa_power_psm(percent: *mut u32, charger: *mut u32) -> u32;
     pub fn sa_power_gauge(voltage: *mut u8, current: *mut u8) -> u32;
@@ -48,6 +54,9 @@ extern "C" {
     pub fn free(p: *mut c_void);
     pub fn sa_net_reinit() -> u32;
     pub fn sa_init() -> u32;
+    pub fn sa_nonblocking(fd: i32) -> i32;
+    pub fn sa_thread_id() -> u64;
+    pub fn sa_now_ms() -> u64;
     pub fn sa_spawn(slot: u32, entry: extern "C" fn(*mut c_void), arg: *mut c_void) -> u32;
     pub fn svcSleepThread(ns: i64) -> u32;
     pub fn sa_listen() -> i32;

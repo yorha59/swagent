@@ -1,4 +1,6 @@
-// Serialize BSD teardown with all worker socket calls. Epochs prevent stale
+// Remote endpoint failures must not request BSD teardown: the listener retries
+// its own descriptors independently. This gate is shared during normal calls;
+// only explicit BSD service recovery is exclusive. Epochs prevent stale
 // download descriptors from closing/reusing descriptors in a new BSD instance.
 use crate::{ffi, log, util::*};
 use core::{

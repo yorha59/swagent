@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <poll.h>
 
 u32 __nx_applet_type = AppletType_None;
 void __libnx_initheap(void) {
@@ -22,8 +23,9 @@ void __appInit(void) {}
 void __appExit(void) {}
 extern void agent_main(void);
 int main(void) { agent_main(); for (;;) svcSleepThread(3600000000000LL); }
-static Thread threads[2];
+static Thread threads[6];
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
+    if (slot >= 6) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
     Result rc = threadCreate(&threads[slot], fn, arg, NULL, 0x18000, 44, -2);
     if (!rc) { rc = threadStart(&threads[slot]); if (rc) threadClose(&threads[slot]); }
     return rc;
@@ -78,7 +80,7 @@ int sa_listen(void) {
 }
 int sa_accept(int fd) {
     int client=accept(fd,NULL,NULL);
-    if (client>=0 && fcntl(client,F_SETFL,0)<0) {
+    if (client>=0 && fcntl(client,F_SETFL,O_NONBLOCK)<0) {
         int e=errno; close(client); errno=e; return -1;
     }
     return client;
@@ -86,14 +88,31 @@ int sa_accept(int fd) {
 int sa_connect(const char *host, const char *port) {
     struct addrinfo hint = {.ai_family=AF_INET,.ai_socktype=SOCK_STREAM}, *list=NULL;
     if (getaddrinfo(host,port,&hint,&list)) { errno=EHOSTUNREACH; return -1; }
-    int saved=EHOSTUNREACH;
-    int fd=-1;
-    for (struct addrinfo *p=list;p;p=p->ai_next) {
+    int saved=EHOSTUNREACH, fd=-1;
+    u64 deadline=armGetSystemTick()+armNsToTicks(10000000000ULL);
+    for (struct addrinfo *p=list;p && armGetSystemTick()<deadline;p=p->ai_next) {
         fd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
         if (fd<0) { saved=errno; continue; }
-        sa_timeout(fd,10);
-        if (!connect(fd,p->ai_addr,p->ai_addrlen)) break;
-        saved=errno; close(fd); fd=-1;
+        if (fcntl(fd,F_SETFL,O_NONBLOCK)<0) { saved=errno; close(fd); fd=-1; break; }
+        int result=connect(fd,p->ai_addr,p->ai_addrlen);
+        saved=errno;
+        if (result<0 && (saved==EINPROGRESS || saved==EALREADY || saved==EWOULDBLOCK)) {
+            while (armGetSystemTick()<deadline) {
+                struct pollfd wait={.fd=fd,.events=POLLOUT};
+                int ready=poll(&wait,1,0);
+                if (ready<0) { saved=errno; break; }
+                if (ready>0) {
+                    socklen_t len=sizeof(saved);
+                    if (getsockopt(fd,SOL_SOCKET,SO_ERROR,&saved,&len)<0) saved=errno;
+                    result=saved ? -1 : 0;
+                    break;
+                }
+                svcSleepThread(10000000);
+            }
+            if (result<0 && armGetSystemTick()>=deadline) saved=ETIMEDOUT;
+        }
+        if (result==0) break;
+        close(fd); fd=-1;
     }
     freeaddrinfo(list); if (fd<0) errno=saved; return fd;
 }
@@ -484,3 +503,9 @@ u32 sa_wifi(u32 join,const u8 *profile,u8 *records,s32 *count) {
 _Static_assert(sizeof(NifmSfNetworkProfileData)==0x17c, "NIFM profile wire size");
 _Static_assert(__builtin_offsetof(NifmSfNetworkProfileData,wireless_setting_data)==0x116, "NIFM wireless offset");
 _Static_assert(__builtin_offsetof(NifmSfWirelessSettingData,passphrase)==0x24, "NIFM shared key offset");
+
+u64 sa_now_ms(void) { return armTicksToNs(armGetSystemTick()) / 1000000; }
+
+u64 sa_thread_id(void) { u64 id=0; svcGetThreadId(&id,CUR_THREAD_HANDLE); return id; }
+
+int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }

@@ -48,47 +48,14 @@ pub fn download_install(url: &str, path: &str, chunk: &mut [u8], limit: u64) -> 
             *expected = None;
         }
         *last = next;
-        for failure in 1..=30 {
-            let offset = match File::open(path, false) {
-                Ok(mut f) => f.size()?,
-                Err(_) => 0,
-            };
-            match download_inner(url, path, chunk, limit, true, offset, expected) {
-                Ok(n) => return Ok(n),
-                Err(e) => {
-                    if !retryable(e) || failure == 30 || crate::retiring() {
-                        return Err(e);
-                    }
-                    let offset = match File::open(path, false) {
-                        Ok(mut f) => f.size()?,
-                        Err(_) => 0,
-                    };
-                    let mut line = Text::<128>::new();
-                    let _ = write!(line, "install: retry {} from offset {}", failure, offset);
-                    crate::log::add(line.str());
-                    sleep(5000);
-                }
-            }
-        }
-        unreachable!()
+        let offset = match File::open(path, false) {
+            Ok(mut f) => f.size()?,
+            Err(_) => 0,
+        };
+        download_inner(url, path, chunk, limit, true, offset, expected)
     })
 }
-fn retryable(e: Error) -> bool {
-    matches!(
-        e.0,
-        "network receive"
-            | "network send"
-            | "network reset"
-            | "network unavailable"
-            | "HTTP connect"
-            | "short HTTP header"
-            | "short HTTP chunk"
-            | "short chunk header"
-            | "short chunk delimiter"
-            | "truncated HTTP trailers"
-            | "truncated HTTP body"
-    ) || (e.0 == "HTTP status" && e.1 >= 500)
-}
+
 fn download_inner(
     url: &str,
     path: &str,
@@ -125,9 +92,13 @@ fn download_inner(
     }
     request.push(b"\r\n")?;
     sock.send(request.bytes())?;
+    let header_deadline = now_ms() + 30_000;
     let mut header = Text::<8193>::new();
     let mut byte = [0];
     while !header.bytes().ends_with(b"\r\n\r\n") {
+        if now_ms() >= header_deadline {
+            return Err(Error("HTTP header budget", 110));
+        }
         if sock.read(&mut byte)? == 0 {
             return Err(Error("short HTTP header", 0));
         }
