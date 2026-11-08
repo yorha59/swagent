@@ -594,7 +594,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.20-rs sys\r\n"),
+        ("version", "swagent-1.21-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -649,7 +649,7 @@ fn removed_commands_are_unknown() {
         protocol::test_run_one();
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, "error: unknown command\r\n", "{command}");
+        assert_eq!(line, std::format!("error: unknown command: {}\r\n", command.split_ascii_whitespace().next().unwrap()), "{command}");
     }
     protocol::test_session(-1);
 }
@@ -1738,7 +1738,7 @@ fn nro_version_and_bare_quit() {
     protocol::test_session(server.as_raw_fd());
     unsafe { host_edition(1); }
     let mut client = BufReader::new(client);
-    for (command, expected) in [("version", "swagent-1.20-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
+    for (command, expected) in [("version", "swagent-1.21-rs nro\r\n"), ("quit", "quit: ok\r\n")] {
         protocol::test_receive(command);
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
@@ -1751,7 +1751,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.20-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.21-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -1764,20 +1764,37 @@ fn boot_log_format_and_installed_confirmation() {
 
 #[test]
 fn accepted_commands_wake_persistent_worker_within_one_second() {
-    use std::{io::{BufRead, BufReader}, os::unix::{io::IntoRawFd, net::UnixStream}, time::{Duration, Instant}};
-    unsafe extern "C" { fn host_listener_fixture(enabled: i32, client: i32, error: i32); }
+    use std::{io::{BufRead, BufReader}, os::unix::{io::{AsRawFd, IntoRawFd}, net::{UnixListener, UnixStream}}, time::{Duration, Instant}};
     let _guard = SERIAL.lock().unwrap();
     setup();
     protocol::test_session(-1);
     protocol::test_worker_start();
     let worker = std::thread::spawn(|| protocol::worker(core::ptr::null_mut()));
-    let (server, mut client) = UnixStream::pair().unwrap();
+    let path = std::env::temp_dir().join(std::format!("swagent-dispatch-{}.sock", std::process::id()));
+    unsafe extern "C" { fn host_listener_fixture(enabled: i32, client: i32, error: i32); }
+    let listener = match UnixListener::bind(&path) {
+        Ok(listener) => Some(listener),
+        // Managed hosts may prohibit bind even for filesystem Unix sockets.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => None,
+        Err(e) => panic!("bind dispatch test socket: {e}"),
+    };
+    let mut client = if let Some(listener) = &listener {
+        let client = UnixStream::connect(&path).unwrap();
+        assert!(protocol::test_listener_step(listener.as_raw_fd()));
+        client
+    } else {
+        std::eprintln!("bind prohibited: using real socketpair with accept fixture");
+        let (server, client) = UnixStream::pair().unwrap();
+        unsafe { host_listener_fixture(1, server.into_raw_fd(), 0); }
+        assert!(protocol::test_listener_step(-1));
+        client
+    };
     client.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-    unsafe { host_listener_fixture(1, server.into_raw_fd(), 0); }
-    assert!(protocol::test_listener_step(-1));
     let lane = std::thread::spawn(|| protocol::test_client_once(0));
     let mut reader = BufReader::new(client.try_clone().unwrap());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut before = Vec::new();
+        log::dump(1000, |line| before.push(String::from_utf8_lossy(line).into_owned()));
         // Separate arrivals exercise the worker both asleep and already running.
         for _ in 0..8 {
             std::thread::sleep(Duration::from_millis(20));
@@ -1791,9 +1808,17 @@ fn accepted_commands_wake_persistent_worker_within_one_second() {
             }
             assert!(start.elapsed() < Duration::from_secs(1));
         }
+        client.write_all(b"zzz\r\n").unwrap();
+        let mut unknown = String::new();
+        assert!(reader.read_line(&mut unknown).unwrap() > 0);
+        assert_eq!(unknown, "error: unknown command: zzz\r\n");
         let mut lines = Vec::new();
-        log::dump(100, |line| lines.push(String::from_utf8_lossy(line).into_owned()));
-        assert!(lines.iter().any(|s| s.starts_with("enqueue:") && s.ends_with("cmd=ps")));
+        log::dump(1000, |line| lines.push(String::from_utf8_lossy(line).into_owned()));
+        for (cmd, expected) in [("ps", 8), ("zzz", 1)] {
+            let count = |logs: &[String]| logs.iter().filter(|s| s.starts_with("enqueue:") && s.ends_with(&std::format!("cmd={cmd}"))).count();
+            assert_eq!(count(&lines) - count(&before), expected, "enqueue count for {cmd}");
+            assert!(lines.iter().any(|s| s.starts_with("pickup:") && s.ends_with(&std::format!("cmd={cmd}"))));
+        }
         assert!(lines.iter().any(|s| s.starts_with("pickup:") && s.contains("queue_ms=") && s.ends_with("cmd=ps")));
     }));
     client.shutdown(std::net::Shutdown::Both).unwrap();
@@ -1801,6 +1826,8 @@ fn accepted_commands_wake_persistent_worker_within_one_second() {
     lane.join().unwrap();
     protocol::test_worker_stop();
     worker.join().unwrap();
+    if listener.is_some() { std::fs::remove_file(path).unwrap(); }
+    drop(listener);
     unsafe { host_listener_fixture(0, -1, 0); }
     if let Err(e) = result { std::panic::resume_unwind(e); }
 }
