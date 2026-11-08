@@ -144,37 +144,55 @@ impl Drop for Cleanup {
 struct Stage(Service);
 impl Drop for Stage {
     fn drop(&mut self) {
-        unsafe { ffi::sa_stage_close(&mut self.0) }
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::sa_stage_close(&mut self.0)
+        }
     }
 }
 struct Mounted(Service);
 impl Drop for Mounted {
     fn drop(&mut self) {
-        unsafe { ffi::fsFsClose(&mut self.0) }
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::fsFsClose(&mut self.0)
+        }
     }
 }
 struct Ncm;
 impl Drop for Ncm {
     fn drop(&mut self) {
-        unsafe { ffi::ncmExit() }
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::ncmExit()
+        }
     }
 }
 struct Ns;
 impl Drop for Ns {
     fn drop(&mut self) {
-        unsafe { ffi::nsExit() }
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::nsExit()
+        }
     }
 }
 struct Storage(Service);
 impl Drop for Storage {
     fn drop(&mut self) {
-        unsafe { ffi::ncmContentStorageClose(&mut self.0) }
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::ncmContentStorageClose(&mut self.0)
+        }
     }
 }
 struct Database(Service);
 impl Drop for Database {
     fn drop(&mut self) {
-        unsafe { ffi::ncmContentMetaDatabaseClose(&mut self.0) }
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::ncmContentMetaDatabaseClose(&mut self.0)
+        }
     }
 }
 struct Placeholder<'a> {
@@ -184,6 +202,7 @@ struct Placeholder<'a> {
 impl Drop for Placeholder<'_> {
     fn drop(&mut self) {
         unsafe {
+            let _operation = crate::budget::Operation::new();
             ffi::ncmContentStorageDeletePlaceHolder(self.storage, self.id.as_ptr());
         }
     }
@@ -232,6 +251,7 @@ fn ticket(f: &mut File, p: &Pfs) -> Result {
         *tik.get_mut(body + 0x146)
             .ok_or(Error("truncated ticket", 0))? &= !0x10;
         let result = unsafe {
+            let _operation = crate::budget::Operation::new();
             ffi::sa_ticket(
                 tik.as_ptr(),
                 tik.len(),
@@ -321,7 +341,13 @@ fn content_size(info: &[u8]) -> Result<u64> {
     Ok(le32(&info[16..])? as u64 | ((info[20] as u64) << 32))
 }
 fn records(key: Key, storage: u32) -> Result {
-    rc(unsafe { ffi::nsInitialize() }, "ns initialize")?;
+    rc(
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::nsInitialize()
+        },
+        "ns initialize",
+    )?;
     let _ns = Ns;
     let app = match key.kind {
         0x81 => key.id ^ 0x800,
@@ -329,7 +355,10 @@ fn records(key: Key, storage: u32) -> Result {
         _ => key.id,
     };
     let mut count = 0;
-    let count_rc = unsafe { ffi::nsCountApplicationContentMeta(app, &mut count) };
+    let count_rc = unsafe {
+        let _operation = crate::budget::Operation::new();
+        ffi::nsCountApplicationContentMeta(app, &mut count)
+    };
     // 0x410 = ns ApplicationIdNotFound. Other IPC failures must not erase records.
     if count_rc != 0 && count_rc != 0x410 {
         return Err(Error("ns CountApplicationContentMeta", count_rc));
@@ -344,6 +373,7 @@ fn records(key: Key, storage: u32) -> Result {
         input[8..].copy_from_slice(&app.to_le_bytes());
         rc(
             unsafe {
+                let _operation = crate::budget::Operation::new();
                 ffi::sa_ns(
                     17,
                     input.as_ptr(),
@@ -381,6 +411,7 @@ fn records(key: Key, storage: u32) -> Result {
     let old_count = written;
     // Goldleaf's delete-then-push flow, preserving the old list for recovery.
     unsafe {
+        let _operation = crate::budget::Operation::new();
         ffi::sa_ns(
             27,
             app.to_le_bytes().as_ptr(),
@@ -391,6 +422,7 @@ fn records(key: Key, storage: u32) -> Result {
         );
     }
     let pushed = unsafe {
+        let _operation = crate::budget::Operation::new();
         ffi::sa_ns(
             16,
             input.as_ptr(),
@@ -402,6 +434,7 @@ fn records(key: Key, storage: u32) -> Result {
     };
     if pushed != 0 && old_count > 0 {
         let restored = unsafe {
+            let _operation = crate::budget::Operation::new();
             ffi::sa_ns(
                 16,
                 input.as_ptr(),
@@ -450,6 +483,7 @@ fn install_inner(
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64> {
     unsafe {
+        let _operation = crate::budget::Operation::new();
         ffi::mkdir(c"sdmc:/switch".as_ptr(), 0o777);
     }
     let mut chunk = Buffer::new(CHUNK)?;
@@ -534,7 +568,10 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     let mut stage_fs = Service::default();
     let mut stage_file = Service::default();
     rc(
-        unsafe { ffi::sa_stage_open(name.c(), cnca.size as i64, &mut stage_file, &mut stage_fs) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::sa_stage_open(name.c(), cnca.size as i64, &mut stage_file, &mut stage_fs)
+        },
         "stage CNMT on SYSTEM",
     )?;
     let mut stage = Stage(stage_fs);
@@ -562,7 +599,10 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
         out.flush()?;
     }
     rc(
-        unsafe { ffi::sa_stage_commit(&mut stage.0) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::sa_stage_commit(&mut stage.0)
+        },
         "commit CNMT staging",
     )?;
     let mut content_path = Text::<256>::new();
@@ -571,7 +611,10 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     let mut mounted = Service::default();
     let mut cnmt_file = Service::default();
     rc(
-        unsafe { ffi::sa_cnmt_open(content_path.c(), &mut cnmt_file, &mut mounted) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::sa_cnmt_open(content_path.c(), &mut cnmt_file, &mut mounted)
+        },
         "open CNMT filesystem",
     )?;
     let mount = Mounted(mounted);
@@ -601,17 +644,29 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
             return Err(Error("NCA size mismatch", 0));
         }
     }
-    rc(unsafe { ffi::ncmInitialize() }, "ncm initialize")?;
+    rc(
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::ncmInitialize()
+        },
+        "ncm initialize",
+    )?;
     let _ncm = Ncm;
     let mut cs = Service::default();
     rc(
-        unsafe { ffi::ncmOpenContentStorage(&mut cs, storage) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::ncmOpenContentStorage(&mut cs, storage)
+        },
         "open content storage",
     )?;
     let mut cs = Storage(cs);
     let mut db = Service::default();
     rc(
-        unsafe { ffi::ncmOpenContentMetaDatabase(&mut db, storage) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::ncmOpenContentMetaDatabase(&mut db, storage)
+        },
         "open meta database",
     )?;
     let mut db = Database(db);
@@ -624,7 +679,10 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
         let e = p.find(name.str())?;
         let mut present = false;
         rc(
-            unsafe { ffi::ncmContentStorageHas(&mut cs.0, &mut present, info.as_ptr()) },
+            unsafe {
+                let _operation = crate::budget::Operation::new();
+                ffi::ncmContentStorageHas(&mut cs.0, &mut present, info.as_ptr())
+            },
             "NCM Has",
         )?;
         if present {
@@ -632,11 +690,15 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
         }
         let mut ph = [0; 16];
         rc(
-            unsafe { ffi::ncmContentStorageGeneratePlaceHolderId(&mut cs.0, ph.as_mut_ptr()) },
+            unsafe {
+                let _operation = crate::budget::Operation::new();
+                ffi::ncmContentStorageGeneratePlaceHolderId(&mut cs.0, ph.as_mut_ptr())
+            },
             "generate placeholder",
         )?;
         rc(
             unsafe {
+                let _operation = crate::budget::Operation::new();
                 ffi::ncmContentStorageCreatePlaceHolder(
                     &mut cs.0,
                     info.as_ptr(),
@@ -664,6 +726,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
             )?;
             rc(
                 unsafe {
+                    let _operation = crate::budget::Operation::new();
                     ffi::ncmContentStorageWritePlaceHolder(
                         ph.storage,
                         ph.id.as_ptr(),
@@ -677,7 +740,10 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
             off += n as u64;
         }
         rc(
-            unsafe { ffi::ncmContentStorageRegister(ph.storage, info.as_ptr(), ph.id.as_ptr()) },
+            unsafe {
+                let _operation = crate::budget::Operation::new();
+                ffi::ncmContentStorageRegister(ph.storage, info.as_ptr(), ph.id.as_ptr())
+            },
             "register content",
         )?;
     }
@@ -727,11 +793,17 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
             );
     }
     rc(
-        unsafe { ffi::ncmContentMetaDatabaseSet(&mut db.0, &m.key, out.as_ptr(), size as u64) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::ncmContentMetaDatabaseSet(&mut db.0, &m.key, out.as_ptr(), size as u64)
+        },
         "set content meta",
     )?;
     rc(
-        unsafe { ffi::ncmContentMetaDatabaseCommit(&mut db.0) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::ncmContentMetaDatabaseCommit(&mut db.0)
+        },
         "commit content meta",
     )?;
     records(m.key, storage)?;

@@ -5,18 +5,30 @@ const PATH: &str = "sdmc:/switch/.swagent_sleep_guard.bin";
 const MAGIC: &[u8; 8] = b"SWASLP01";
 
 fn settings<T>(f: impl FnOnce(ffi::SleepSettings) -> Result<T>) -> Result<T> {
-    rc(unsafe { ffi::setsysInitialize() }, "initialize set:sys")?;
+    rc(
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::setsysInitialize()
+        },
+        "initialize set:sys",
+    )?;
     let _session = crate::protocol::Settings;
     let mut current = ffi::SleepSettings::default();
     rc(
-        unsafe { ffi::setsysGetSleepSettings(&mut current) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::setsysGetSleepSettings(&mut current)
+        },
         "read sleep settings",
     )?;
     f(current)
 }
 fn write(settings: &ffi::SleepSettings) -> Result {
     rc(
-        unsafe { ffi::setsysSetSleepSettings(settings) },
+        unsafe {
+            let _operation = crate::budget::Operation::new();
+            ffi::setsysSetSleepSettings(settings)
+        },
         "write sleep settings",
     )
 }
@@ -45,6 +57,7 @@ pub(crate) fn cancel() {
 }
 pub(crate) fn begin() -> Result {
     unsafe {
+        let _operation = crate::budget::Operation::new();
         ffi::mkdir(c"sdmc:/switch".as_ptr(), 0o777);
     }
     // Never overwrite a recovery record left by an unsuccessful restore.

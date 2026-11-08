@@ -1,7 +1,6 @@
 use super::*;
 use std::{
     io::{Read, Write},
-    net::TcpListener,
     sync::Mutex,
 };
 use util::Error;
@@ -14,7 +13,7 @@ extern "C" {
     fn host_process_stat(n: u32) -> u32;
 }
 fn server(body: Vec<u8>, chunked: bool, truncate: bool) -> (String, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = test_transport::HttpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
@@ -558,7 +557,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let _guard = SERIAL.lock().unwrap();
     setup();
     unsafe { host_reset(0) };
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = test_transport::HttpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -595,7 +594,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.15-rs\r\n"),
+        ("version", "swagent-1.16-rs\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -764,7 +763,7 @@ fn sleep_network_logic_and_checked_bounds() {
 }
 
 #[test]
-fn install_eagain_retries_and_preserves_download() {
+fn install_eagain_returns_immediately_and_preserves_download() {
     let _guard = SERIAL.lock().unwrap();
     setup();
     unsafe extern "C" {
@@ -781,7 +780,7 @@ fn install_eagain_retries_and_preserves_download() {
             host_receive_fixture(response.as_ptr(), 11);
         }
         let result = install::install("http://fixture/test", 5);
-        assert_eq!(unsafe { host_fixture_connects() }, 30);
+        assert_eq!(unsafe { host_fixture_connects() }, 1);
         unsafe {
             host_receive_fixture(core::ptr::null(), 0);
         }
@@ -836,7 +835,7 @@ fn bsd_reset_waits_for_calls_and_rejects_stale_descriptors() {
 }
 
 #[test]
-fn connect_failure_requests_recovery_and_init_failure_retries() {
+fn remote_connect_failure_does_not_reset_listener_and_init_failure_retries() {
     let _guard = SERIAL.lock().unwrap();
     unsafe extern "C" {
         fn host_connect_failure(error: i32);
@@ -851,7 +850,7 @@ fn connect_failure_requests_recovery_and_init_failure_retries() {
             host_connect_failure(0);
         }
         assert!(matches!(result, Err(Error("HTTP connect", e)) if e == code as u32));
-        assert_eq!(crate::net::pending(), code == 9);
+        assert!(!crate::net::pending());
     }
     unsafe {
         host_reinit_failures(1);
@@ -904,7 +903,7 @@ fn install_http_range_resume_restart_and_complete() {
     setup();
     let path = "sdmc:/switch/range";
     for code in [206, 200] {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = test_transport::HttpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
             "http://127.0.0.1:{}/range",
             listener.local_addr().unwrap().port()
@@ -936,6 +935,7 @@ fn install_http_range_resume_restart_and_complete() {
             }
         });
         let mut scratch = [0; 16];
+        assert!(http::download_install(&url, path, &mut scratch, 100).is_err());
         let size = http::download_install(&url, path, &mut scratch, 100).unwrap();
         server.join().unwrap();
         let expected: &[u8] = match code {
@@ -1559,5 +1559,161 @@ fn put_size_limit_wire_reply() {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         assert_eq!(line, "put: error size limit 268435456\r\n");
+    }
+}
+
+#[test]
+fn refused_install_reports_errno_without_retry_or_listener_reset() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::AsRawFd, net::UnixStream}, time::{Duration, Instant}};
+    unsafe extern "C" { fn host_connect_failure(error: i32); }
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.as_raw_fd());
+    unsafe { host_connect_failure(111); }
+    let started = Instant::now();
+    protocol::test_receive("install http://fixture/refused sd");
+    protocol::test_run_one();
+    unsafe { host_connect_failure(0); }
+    let mut line = String::new();
+    BufReader::new(client).read_line(&mut line).unwrap();
+    assert_eq!(line, "install: error HTTP connect rc=111\r\n");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(!crate::net::pending());
+    protocol::test_session(-1);
+}
+
+#[test]
+fn accept_responds_during_upload_and_recovers_after_listener_failure() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::IntoRawFd, net::UnixStream}, time::{Duration, Instant}};
+    unsafe extern "C" {
+        fn host_listener_fixture(enabled: i32, client: i32, error: i32);
+        fn host_listen_failure(error: i32);
+    }
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let (upload_server, mut upload_client) = UnixStream::pair().unwrap();
+    unsafe { host_listener_fixture(1, upload_server.into_raw_fd(), 0); }
+    let mut listener = -1;
+    protocol::test_serve_step(&mut listener);
+    assert!(listener >= 0);
+    let upload_lane = std::thread::spawn(|| protocol::test_client_once(0));
+    upload_client.write_all(b"put switch/concurrent-upload 1024\r\na").unwrap();
+    // Another connection is admitted while the first lane waits for its body.
+    let (ping_server, mut ping_client) = UnixStream::pair().unwrap();
+    ping_client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    unsafe { host_listener_fixture(1, ping_server.into_raw_fd(), 0); }
+    let started = Instant::now();
+    assert!(protocol::test_listener_step(listener));
+    let ping_lane = std::thread::spawn(|| protocol::test_client_once(1));
+    ping_client.write_all(b"ping\r\n").unwrap();
+    let mut line = String::new();
+    let mut reader = BufReader::new(ping_client);
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "pong\r\n");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // An accept failure closes this listener; a recreated listener serves again.
+    unsafe { host_listener_fixture(1, -1, 9); }
+    protocol::test_serve_step(&mut listener);
+    assert_eq!(listener, -1);
+    unsafe { host_listen_failure(24); }
+    protocol::test_serve_step(&mut listener);
+    assert_eq!(listener, -24);
+    unsafe { host_listen_failure(0); }
+    let (new_server, mut new_client) = UnixStream::pair().unwrap();
+    new_client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    unsafe { host_listener_fixture(1, new_server.into_raw_fd(), 0); }
+    protocol::test_serve_step(&mut listener);
+    assert!(listener >= 0);
+    let replacement_lane = std::thread::spawn(|| protocol::test_client_once(2));
+    new_client.write_all(b"ping\r\n").unwrap();
+    let mut new_reader = BufReader::new(new_client);
+    line.clear();
+    new_reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "pong\r\n");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(upload_client); drop(reader); drop(new_reader);
+    upload_lane.join().unwrap(); ping_lane.join().unwrap(); replacement_lane.join().unwrap();
+    assert!(!std::path::Path::new("build/host-sd/switch/concurrent-upload").exists());
+    unsafe { ffi::close(listener); host_listener_fixture(0, -1, 0); }
+}
+
+#[test]
+fn hung_install_operation_times_out_without_reusing_its_lane() {
+    use std::{io::{BufRead, BufReader}, os::unix::{io::AsRawFd, net::UnixStream}, time::{Duration, Instant}};
+    unsafe extern "C" {
+        fn host_connect_block(block: i32);
+        fn host_connect_entered() -> i32;
+        fn host_clock_offset(ms: u64);
+    }
+    let _guard = SERIAL.lock().unwrap();
+    setup();
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.as_raw_fd());
+    unsafe { host_connect_block(1); }
+    protocol::test_receive("install http://fixture/stuck sd");
+    let worker = std::thread::spawn(protocol::test_run_one);
+    let start = Instant::now();
+    while unsafe { host_connect_entered() } == 0 {
+        assert!(start.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // Simulate a native call that ignores socket timeouts. The listener's
+    // watchdog must reply even though the command thread cannot return yet.
+    unsafe { host_clock_offset(30_001); }
+    protocol::check_budget();
+    let mut reader = BufReader::new(client);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "install: error wall-clock budget rc=110\r\n");
+    assert!(!worker.is_finished());
+    protocol::test_receive("ping");
+    line.clear(); reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "pong\r\n");
+    unsafe { host_connect_block(0); }
+    worker.join().unwrap();
+    unsafe { host_clock_offset(0); }
+    protocol::test_receive("ping");
+    line.clear(); reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "pong\r\n"); // No duplicate install error after late return.
+    protocol::test_session(-1);
+}
+
+// Unix socket pairs exercise the HTTP stream and blocked-worker paths even in
+// sandboxes which prohibit binding TCP loopback ports. Production uses TCP.
+mod test_transport {
+    use std::{net::{SocketAddr, Ipv4Addr}, os::unix::{net::UnixStream, io::IntoRawFd},
+        sync::{Mutex, mpsc, atomic::{AtomicU16, Ordering}}};
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(18000);
+    static LISTENERS: Mutex<Vec<(u16, mpsc::Sender<UnixStream>)>> = Mutex::new(Vec::new());
+    pub struct HttpListener { port: u16, incoming: mpsc::Receiver<UnixStream> }
+    impl HttpListener {
+        pub fn bind(_: &str) -> std::io::Result<Self> {
+            let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+            let (tx, incoming) = mpsc::channel();
+            LISTENERS.lock().unwrap().push((port, tx));
+            Ok(Self {port, incoming})
+        }
+        pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+            Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)))
+        }
+        pub fn accept(&self) -> std::io::Result<(UnixStream, SocketAddr)> {
+            let stream = self.incoming.recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?;
+            Ok((stream, self.local_addr()?))
+        }
+    }
+    impl Drop for HttpListener {
+        fn drop(&mut self) { LISTENERS.lock().unwrap().retain(|(p,_)| *p != self.port); }
+    }
+    #[no_mangle]
+    pub extern "C" fn host_test_connect(port: u16) -> i32 {
+        let listeners = LISTENERS.lock().unwrap();
+        let Some((_, tx)) = listeners.iter().find(|(p,_)| *p == port) else { return -1; };
+        let Ok((client, server)) = UnixStream::pair() else { return -1; };
+        if tx.send(server).is_err() { return -1; }
+        client.into_raw_fd()
     }
 }

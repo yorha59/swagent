@@ -9,11 +9,15 @@ use core::{
 pub struct Error(pub &'static str, pub u32);
 pub type Result<T = ()> = core::result::Result<T, Error>;
 pub fn rc(code: u32, what: &'static str) -> Result {
+    crate::budget::check()?;
     if code == 0 {
         Ok(())
     } else {
         Err(Error(what, code))
     }
+}
+pub fn now_ms() -> u64 {
+    unsafe { ffi::sa_now_ms() }
 }
 pub fn sleep(ms: u64) {
     unsafe {
