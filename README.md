@@ -225,11 +225,11 @@ error, never proof that a partial file is complete. When the original total is
 unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 
-### Manual hbmenu edition (1.30)
+### Manual hbmenu edition (1.31)
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. After binding, the console
-prints `swagent-1.30-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
+prints `swagent-1.31-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
 The listener binds all interfaces. If the sysmodule owns port 6000, the NRO
 shows a busy message and retries every five seconds, taking over automatically
 when the port becomes available. PLUS displays the HOME instruction while waiting.
@@ -242,7 +242,7 @@ handlers and the reusable 4 MiB install chunk. The resident edition uses its
 applet/HID/FS startup. It initializes the console before starting network workers,
 skips resident sleep-setting recovery, firmware probing and the SD log writer,
 and prints the endpoint only from the console thread.
-`version` reports `swagent-1.30-rs nro` or `swagent-1.30-rs sys`.
+`version` reports `swagent-1.31-rs nro` or `swagent-1.31-rs sys`.
 The `update` command retains its resident sysmodule update behavior.
 
 `make nro` uses official devkitPro `elf2nro` and libnx crt0/relocation handling.
@@ -329,7 +329,7 @@ console after each status print and every 100ms while polling PLUS. Bind
 failures retry every five seconds; a busy port shows the sysmodule warning,
 and successful takeover displays the LAN IP and port.
 
-Version 1.30 (`swagent-1.30-rs`) leaves NRO teardown to the system. Press HOME
+Version 1.31 (`swagent-1.31-rs`) leaves NRO teardown to the system. Press HOME
 to exit. PLUS only prints `press HOME to exit` and refreshes the console; main
 never returns, including when the applet loop reports exit or startup fails.
 Workers keep running until system teardown. Bare `quit` disconnects the client.
@@ -347,3 +347,30 @@ are refused. No wildcard expansion or recursive deletion is performed.
 `tail <SD-path> [n]` (default 40) scans backwards in 4 KiB blocks and streams
 selected bytes between `tail: begin` and `tail: end`. Outbound connections retain
 the 15-second per-attempt poll timeout and close failed sockets before retrying.
+
+### Installed-title NSP export (1.31)
+
+`dump <16-hex-digit-titleid> [SD-path]` runs on the install worker lane and
+exports exactly that base or update title. The default is
+`sdmc:/switch/dump/<titleid>.nsp`; explicit paths must be under `/switch/`,
+without `..`. `status` reports the shared phase/rx/total/pct counters.
+NSP output uses a 4 MiB stream buffer (dump allocations remain below 8 MiB).
+Errors remove partial output, enter the ring/persistent log, clear pending
+worker jobs and back off before accepting more work. Missing tickets produce a
+warning and a final `notik` suffix.
+
+Common tickets and their certificate chains use ES export commands 22/23.
+Personalized plaintext tickets use read-only ES savedata. **Encrypted/volatile
+personalized tickets are not yet supported**: they return an error rather than
+silently creating a ticketless archive. Read-only savedata mounting may also
+fail when ES owns the save; this propagates as an error. This is a remaining
+limitation relative to nxdumptool's raw-save and ES-memory decryption path.
+No console deployment has been performed.
+
+Host verification (fixtures are required, not silently skipped):
+
+```sh
+cc -Wall -Wextra -c tests/host.c -o build/host.o
+RUSTFLAGS="-C link-arg=$PWD/build/host.o -A dead_code" cargo test --target aarch64-apple-darwin
+DEVKITPRO=~/devkitpro DEVKITA64=~/devkitpro/devkitA64 make
+```
