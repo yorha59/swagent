@@ -32,6 +32,10 @@ pub struct SleepSettings {
     pub console: i32,
 }
 extern "C" {
+    pub fn sa_dump_mkdir(path: *const c_char) -> u32;
+    pub fn sa_dump_meta(title: u64, storage: *mut u32, infos: *mut u8, capacity: u32, count: *mut u32) -> u32;
+    pub fn sa_dump_read(storage: u32, id: *const u8, offset: u64, bytes: *mut u8, size: usize) -> u32;
+    pub fn sa_dump_ticket(storage: u32, infos: *const u8, count: u32, rights: *mut u8, ticket: *mut u8, ticket_cap: usize, tn: *mut usize, cert: *mut u8, cert_cap: usize, cn: *mut usize) -> u32;
     pub fn sa_jobs_init();
     pub fn sa_jobs_signal();
     pub fn sa_jobs_wait();

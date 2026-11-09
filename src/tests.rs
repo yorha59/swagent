@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.30-rs sys\r\n"),
+        ("version", "swagent-1.31-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1742,7 +1742,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.30-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.31-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1757,7 +1757,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.30-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.31-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -2099,5 +2099,170 @@ fn rm_exact_file_and_guards() {
     line.clear(); reader.read_line(&mut line).unwrap();
     assert!(line.starts_with("rm: error rc="));
     assert!(std::path::Path::new("build/host-sd/switch/rm-directory").is_dir());
+    protocol::test_session(-1);
+}
+
+struct DumpFixture {
+    file: io::File,
+    pfs: install::Pfs,
+}
+impl DumpFixture {
+    fn open(path: &str) -> Self {
+        let mut file=io::File::open(path,false).unwrap();
+        let pfs=install::Pfs::open(&mut file).unwrap();
+        Self {file,pfs}
+    }
+    fn items(&self) -> dump::Catalog {
+        let mut out=dump::Catalog::new().unwrap();
+        for i in 0..self.pfs.count {
+            let e=self.pfs.entry(i).unwrap();
+            let mut name=util::Text::new();name.push(e.name.as_bytes()).unwrap();
+            let mut id=[0;16];id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            out.push(dump::Item { name, size:e.size,id }).unwrap();
+        }
+        out
+    }
+}
+impl dump::Backend for DumpFixture {
+    fn catalog(&mut self,_:u64,out:&mut dump::Catalog)->util::Result<bool> {
+        let items=self.items();for item in items.entries() {out.push(*item)?;} Ok(false)
+    }
+    fn read(&mut self,item:&dump::Item,off:u64,bytes:&mut[u8])->util::Result {
+        let e=self.pfs.entry(util::le64(&item.id)? as usize)?;
+        if off.checked_add(bytes.len() as u64).is_none_or(|n| n>e.size) {return Err(Error("mock read bounds",0));}
+        self.file.read(e.off+off,bytes)
+    }
+}
+#[test]
+fn dump_real_fixtures_byte_exact_roundtrip() {
+    let _guard=SERIAL.lock().unwrap();setup();
+    for stem in ["GTA_VC_Base","P5R_UPDATE"] {
+        let path=format!("/Users/sichengzu/Switch/nsp_share/{stem}.nsp");
+        let mut source=DumpFixture::open(&path);
+        let items=source.items();
+        let used=16+items.count*24+items.entries().iter().map(|e| e.name.len+1).sum::<usize>();
+        let padding=source.pfs.base as usize-used;
+        let output=format!("/tmp/swagent-{stem}-roundtrip.nsp");
+        let mut out=io::File::open(&output,true).unwrap();
+        dump::pack(&mut source,items.entries(),padding,&mut out,&mut |_|{}).unwrap();drop(out);
+        let mut original=std::fs::File::open(&path).unwrap();let mut rebuilt=std::fs::File::open(&output).unwrap();
+        assert_eq!(original.metadata().unwrap().len(),rebuilt.metadata().unwrap().len());
+        let mut a=vec![0;1024*1024];let mut b=vec![0;1024*1024];let mut offset=0;
+        loop {let n=original.read(&mut a).unwrap();if n==0{break;} rebuilt.read_exact(&mut b[..n]).unwrap();assert_eq!(a[..n],b[..n],"{stem} offset={offset}");offset+=n;}
+        eprintln!("{stem}: byte-identical {offset} bytes");std::fs::remove_file(output).unwrap();
+    }
+}
+struct DumpMock { fail: bool, notik: bool }
+impl DumpMock {
+    fn item()->dump::Item {let mut name=util::Text::new();name.push(b"00112233445566778899aabbccddeeff.cnmt.nca").unwrap();dump::Item {name,size:4*1024*1024+31,id:[1;16]}}
+}
+impl dump::Backend for DumpMock {
+    fn catalog(&mut self,title:u64,out:&mut dump::Catalog)->util::Result<bool> {
+        if title!=0x0100000000000000{return Err(Error("mock title missing",2));}
+        out.push(Self::item())?;Ok(self.notik)
+    }
+    fn read(&mut self,_:&dump::Item,off:u64,bytes:&mut[u8])->util::Result {
+        assert!(bytes.len()<=4*1024*1024);
+        if self.fail{return Err(Error("mock IPC read failure",9));}
+        for (i,b) in bytes.iter_mut().enumerate(){*b=((off+i as u64)%251) as u8;}Ok(())
+    }
+}
+fn verify_mock_dump(path:&str) {
+    let mut out=io::File::open(path,false).unwrap();let p=install::Pfs::open(&mut out).unwrap();assert_eq!(p.count,1);
+    let e=p.entry(0).unwrap();assert_eq!(e.name,DumpMock::item().name.str());assert_eq!(e.size,DumpMock::item().size);
+    let mut buf=vec![0;65536];let mut off=0;
+    while off<e.size {let n=(e.size-off).min(buf.len() as u64) as usize;out.read(e.off+off,&mut buf[..n]).unwrap();for(i,b) in buf[..n].iter().enumerate(){assert_eq!(*b,((off+i as u64)%251) as u8);}off+=n as u64;}
+}
+#[test]
+fn dump_mock_pipeline_paths_and_cleanup() {
+    let _guard=SERIAL.lock().unwrap();setup();
+    for bad in ["sdmc:/atmosphere/a.nsp","/switch/../a","/switch/a..b","sdmc:/switch/","nand:/switch/a","/switch/a\\b"] {assert!(dump::path(1,Some(bad)).is_err(),"{bad}");}
+    assert_eq!(dump::path(1,None).unwrap().str(),"sdmc:/switch/dump/0000000000000001.nsp");
+    let mut lines=Vec::new();
+    dump::run(&mut DumpMock {fail:false,notik:true},0x0100000000000000,Some("/switch/dump/mock.nsp"),&mut|s|lines.push(s.to_owned())).unwrap();
+    assert!(lines.last().unwrap().ends_with(" notik"));verify_mock_dump("sdmc:/switch/dump/mock.nsp");assert_eq!(install::progress().0,3);
+    assert_eq!(dump::run(&mut DumpMock {fail:true,notik:false},0x0100000000000000,Some("/switch/dump/fail.nsp"),&mut |_|{}),Err(Error("mock IPC read failure",9)));
+    assert!(!std::path::Path::new("build/host-sd/switch/dump/fail.nsp").exists());assert_eq!(install::progress().0,4);
+}
+#[test]
+fn dump_socketpair_command_progress_status() {
+    use std::{io::{BufRead,BufReader},os::unix::{net::UnixStream,io::IntoRawFd},time::Duration};
+    let _guard=SERIAL.lock().unwrap();setup();
+    unsafe extern "C" {fn host_listener_fixture(enabled:i32,client:i32,error:i32);}
+    protocol::test_session(-1);protocol::test_worker_start();
+    let (server,mut client)=UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    unsafe {host_listener_fixture(1,server.into_raw_fd(),0);}
+    assert!(protocol::test_listener_step(-1));
+    let worker=std::thread::spawn(|| {dump::test_backend(Box::new(DumpMock{fail:false,notik:false}));protocol::worker(core::ptr::null_mut());});
+    let lane=std::thread::spawn(||protocol::test_client_once(0));
+    let mut reader=BufReader::new(client.try_clone().unwrap());
+    client.write_all(b"dump 0100000000000000 /switch/dump/test.nsp\r\n").unwrap();
+    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
+        let mut lines=Vec::new();
+        loop {let mut s=String::new();assert!(reader.read_line(&mut s).unwrap()>0);let done=s.starts_with("dump: ok");assert!(!s.contains("error"),"{s}");lines.push(s);if done{break;}}
+        assert_eq!(lines[0],"dump: starting\r\n");assert!(lines.iter().any(|s|s.starts_with("status: writing rx=")&&s.contains("pct=")));
+        // The done phase is committed after the final emit; wait for worker completion.
+        for _ in 0..100 {if install::progress().0==3{break;}std::thread::sleep(Duration::from_millis(1));}
+        client.write_all(b"status\r\n").unwrap();let mut s=String::new();reader.read_line(&mut s).unwrap();assert!(s.starts_with("status: done rx="),"{s}");assert!(s.contains("pct=100.0"));
+        verify_mock_dump("sdmc:/switch/dump/test.nsp");
+    }));
+    client.shutdown(std::net::Shutdown::Both).unwrap();lane.join().unwrap();protocol::test_worker_stop();worker.join().unwrap();protocol::test_session(-1);unsafe{host_listener_fixture(0,-1,0);}
+    result.unwrap();
+}
+
+#[test]
+fn dump_progress_renews_budget_and_stall_expires() {
+    unsafe extern "C" { fn host_clock_offset(ms:u64); }
+    struct Timed { elapsed:u64, step:u64 }
+    impl dump::Backend for Timed {
+        fn catalog(&mut self,_:u64,_:&mut dump::Catalog)->util::Result<bool>{Ok(true)}
+        fn read(&mut self,_:&dump::Item,_:u64,bytes:&mut[u8])->util::Result {
+            bytes.fill(7);self.elapsed+=self.step;unsafe{host_clock_offset(self.elapsed);}Ok(())
+        }
+    }
+    let _guard=SERIAL.lock().unwrap();setup();
+    let mut item=DumpMock::item();item.size=4*1024*1024*12;
+    for (step,success) in [(29000,true),(30001,false)] {
+        unsafe{host_clock_offset(0);}budget::begin();
+        let mut out=io::File::open("sdmc:/switch/dump-budget.nsp",true).unwrap();
+        let result=dump::pack(&mut Timed{elapsed:0,step},&[item],0,&mut out,&mut |_|{});
+        let expired=budget::expired();budget::end();unsafe{host_clock_offset(0);}
+        assert_eq!(result.is_ok(),success);assert_eq!(expired,!success);
+        if !success {assert_eq!(result,Err(Error("operation wall-clock budget",110)));}
+    }
+}
+
+#[test]
+fn dump_mock_fixture_pipeline_preserves_nca_ticket_and_cert() {
+    let _guard=SERIAL.lock().unwrap();setup();
+    let fixture="/Users/sichengzu/Switch/nsp_share/P5R_UPDATE.nsp";
+    let mut source=DumpFixture::open(fixture);
+    dump::run(&mut source,0x01004b10157f2800,Some("/switch/dump/fixture.nsp"),&mut |_|{}).unwrap();
+    let mut rebuilt=io::File::open("sdmc:/switch/dump/fixture.nsp",false).unwrap();
+    let pfs=install::Pfs::open(&mut rebuilt).unwrap();assert_eq!(pfs.count,source.pfs.count);
+    let mut a=vec![0;1024*1024];let mut b=vec![0;1024*1024];
+    for i in 0..pfs.count {
+        let original=source.pfs.entry(i).unwrap();let result=pfs.entry(i).unwrap();
+        assert_eq!(original.name,result.name);assert_eq!(original.size,result.size);
+        let mut off=0;
+        while off<original.size {let n=(original.size-off).min(a.len() as u64) as usize;source.file.read(original.off+off,&mut a[..n]).unwrap();rebuilt.read(result.off+off,&mut b[..n]).unwrap();assert_eq!(a[..n],b[..n]);off+=n as u64;}
+    }
+}
+
+#[test]
+fn dump_error_clears_pending_queue_and_worker_accepts_next_job() {
+    use std::{io::{BufRead,BufReader},os::unix::{net::UnixStream,io::AsRawFd}};
+    let _guard=SERIAL.lock().unwrap();setup();
+    let (server,client)=UnixStream::pair().unwrap();client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.as_raw_fd());
+    dump::test_backend(Box::new(DumpMock {fail:true,notik:false}));
+    protocol::test_receive("dump 0100000000000000 /switch/dump/recover.nsp");protocol::test_receive("ps");
+    protocol::test_run_one();
+    let mut reader=BufReader::new(client);let mut lines=Vec::new();
+    for _ in 0..3 {let mut s=String::new();reader.read_line(&mut s).unwrap();lines.push(s);}
+    assert_eq!(lines[0],"dump: starting\r\n");assert!(lines[1].starts_with("dump: error mock IPC read failure"));assert!(lines[2].contains("queue cleared"));
+    protocol::test_receive("ps");protocol::test_run_one();
+    loop {let mut s=String::new();reader.read_line(&mut s).unwrap();assert!(s.starts_with("ps: "));if s=="ps: end\r\n" {break;}}
     protocol::test_session(-1);
 }

@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 mod installed;
+mod dump;
 mod budget;
 mod ffi;
 mod files;

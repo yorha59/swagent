@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.30-rs"; }
+const char *sa_version(void) { return "swagent-1.31-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -721,4 +721,149 @@ u32 sa_installed(s32 offset,u64 *title,char *name,size_t capacity,s32 *count) {
 u32 sa_installed_delete(u64 title) {
     Result rc=nsInitialize(); if(rc)return rc;
     rc=nsDeleteApplicationCompletely(title); nsExit(); return rc;
+}
+
+extern u32 agent_dump_progress(void);
+
+/* Dump adapters: NCM direct, never ns:dev. Callers serialize the long lane. */
+u32 sa_dump_meta(u64 title,u32 *storage,NcmContentInfo *infos,u32 capacity,u32 *count) {
+    if (!capacity || capacity>1026) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    Result rc=ncmInitialize(); if(rc)return rc;
+    const NcmStorageId ids[]={NcmStorageId_SdCard,NcmStorageId_BuiltInUser,NcmStorageId_BuiltInSystem};
+    bool found=false; NcmContentMetaKey best={0}; u32 selected=0;
+    for(unsigned i=0;i<3;i++) {
+        NcmContentMetaDatabase db; rc=ncmOpenContentMetaDatabase(&db,ids[i]); if(rc)continue;
+        NcmContentMetaKey key={0}; rc=ncmContentMetaDatabaseGetLatestContentMetaKey(&db,&key,title);
+        ncmContentMetaDatabaseClose(&db);
+        if(!rc && key.id==title && (!found || key.version>best.version)) { best=key; selected=ids[i]; found=true; }
+    }
+    if(!found) { ncmExit(); return MAKERESULT(Module_Libnx,LibnxError_NotFound); }
+    if((best.type!=NcmContentMetaType_Application && best.type!=NcmContentMetaType_Patch) || best.install_type!=NcmContentInstallType_Full) {
+        ncmExit(); return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    }
+    NcmContentMetaDatabase db; rc=ncmOpenContentMetaDatabase(&db,selected);
+    if(!rc) {
+        s32 n=0; rc=ncmContentMetaDatabaseListContentInfo(&db,&n,infos,capacity,&best,0);
+        if(!rc && (n<=0 || (u32)n>=capacity)) rc=MAKERESULT(Module_Libnx,LibnxError_BadInput);
+        if(!rc) { *storage=selected; *count=n; }
+        ncmContentMetaDatabaseClose(&db);
+    }
+    ncmExit(); return rc;
+}
+u32 sa_dump_read(u32 storage,const NcmContentId *id,u64 offset,void *bytes,size_t size) {
+    Result rc=ncmInitialize(); if(rc)return rc;
+    NcmContentStorage cs; rc=ncmOpenContentStorage(&cs,storage);
+    if(!rc) { rc=ncmContentStorageReadContentIdFile(&cs,bytes,size,id,offset); ncmContentStorageClose(&cs); }
+    ncmExit(); return rc;
+}
+u32 sa_dump_mkdir(const char *path) {
+    FsFileSystem *fs; char p[FS_MAX_PATH];
+    if(fsdevTranslatePath(path,&fs,p))return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    FsDirEntryType kind;
+    Result rc=fsFsGetEntryType(fs,p,&kind);
+    if(!rc)return kind==FsDirEntryType_Dir ? 0 : MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    return fsFsCreateDirectory(fs,p);
+}
+static Result dump_save(FsFileSystem *fs,u64 id) {
+    FsSaveDataAttribute attr={0}; attr.system_save_data_id=id; attr.save_data_type=FsSaveDataType_System;
+    return fsOpenReadOnlySaveDataFileSystem(fs,FsSaveDataSpaceId_System,&attr);
+}
+static Result dump_read_exact(FsFile *f,u64 offset,void *p,size_t size) {
+    u64 n=0; Result rc=fsFileRead(f,offset,p,size,FsReadOption_None,&n);
+    return rc ? rc : n==size ? 0 : MAKERESULT(Module_Libnx,LibnxError_BadInput);
+}
+/* Common tickets/certificates use the ES export IPC (22/23). Personalized
+ * plaintext records use read-only savedata; encrypted records fail explicitly. */
+u32 sa_dump_ticket(u32 storage,const NcmContentInfo *infos,u32 count,u8 *rights,void *ticket,size_t tcap,size_t *tn,void *cert,size_t ccap,size_t *cn) {
+    *tn=*cn=0; memset(rights,0,16);
+    Result rc=ncmInitialize(); if(rc)return rc;
+    NcmContentStorage cs; rc=ncmOpenContentStorage(&cs,storage);
+    if(!rc) {
+        for(u32 i=0;i<count;i++) {
+            NcmRightsId rid={0}; rc=ncmContentStorageGetRightsIdFromContentId(&cs,&rid,&infos[i].content_id,FsContentAttributes_All);
+            if(!rc)rc=agent_dump_progress();
+            if(rc)break;
+            const u8 zero[16]={0};
+            if(memcmp(&rid.rights_id,zero,16)) {
+                if(memcmp(rights,zero,16) && memcmp(rights,&rid.rights_id,16)) { rc=MAKERESULT(Module_Libnx,LibnxError_BadInput); break; }
+                memcpy(rights,&rid.rights_id,16);
+            }
+        }
+        ncmContentStorageClose(&cs);
+    }
+    ncmExit(); if(rc)return rc;
+    const u8 zero[16]={0}; if(!memcmp(rights,zero,16))return 0;
+    Service es; rc=smGetService(&es,"es"); if(rc)return rc;
+    int type=-1;
+    for(int kind=0;kind<2 && type<0 && !rc;kind++) {
+        s32 total=0; rc=serviceDispatchOut(&es,9+kind,total);
+        if(rc)break;
+        if(total<0 || total>1048576) { rc=MAKERESULT(Module_Libnx,LibnxError_BadInput); break; }
+        for(s32 offset=0;offset<total;) {
+            FsRightsId ids[64]; s32 written=0;
+            rc=serviceDispatchInOut(&es,11+kind,offset,written,
+                .buffer_attrs={SfBufferAttr_Out|SfBufferAttr_HipcMapAlias},.buffers={{ids,sizeof(ids)}});
+            if(rc)break;
+            if(written<=0 || written>64) { rc=MAKERESULT(Module_Libnx,LibnxError_BadInput); break; }
+            for(s32 i=0;i<written;i++) if(!memcmp(rights,&ids[i],16))type=kind;
+            offset+=written;
+            rc=agent_dump_progress(); if(rc)break;
+        }
+    }
+    if(!rc && type==0) {
+        FsRightsId input; memcpy(&input,rights,16);
+        struct { u64 ticket_size,cert_size; } sizes={0},actual={0};
+        rc=serviceDispatchInOut(&es,22,input,sizes);
+        if(!rc && (!sizes.ticket_size || sizes.ticket_size>tcap || !sizes.cert_size || sizes.cert_size>ccap)) rc=MAKERESULT(Module_Libnx,LibnxError_BadInput);
+        if(!rc) rc=serviceDispatchInOut(&es,23,input,actual,
+            .buffer_attrs={SfBufferAttr_Out|SfBufferAttr_HipcMapAlias,SfBufferAttr_Out|SfBufferAttr_HipcMapAlias},
+            .buffers={{ticket,sizes.ticket_size},{cert,sizes.cert_size}});
+        if(!rc && (actual.ticket_size!=sizes.ticket_size || actual.cert_size!=sizes.cert_size)) rc=MAKERESULT(Module_Libnx,LibnxError_BadInput);
+        if(!rc) { *tn=actual.ticket_size; *cn=actual.cert_size; }
+        serviceClose(&es); return rc;
+    }
+    serviceClose(&es); if(rc || type<0)return rc;
+    FsFileSystem fs; rc=dump_save(&fs,0x80000000000000e1ULL+type); if(rc)return rc;
+    FsFile list; rc=fsFsOpenFile(&fs,"/ticket_list.bin",FsOpenMode_Read,&list);
+    u64 ticket_offset=UINT64_MAX;
+    if(!rc) {
+        s64 size=0; rc=fsFileGetSize(&list,&size);
+        if(!rc && (size<0 || size%32))rc=MAKERESULT(Module_Libnx,LibnxError_BadInput);
+        for(s64 off=0;!rc && off<size;) {
+            u8 entries[4096]; size_t n=(size-off)>(s64)sizeof(entries) ? sizeof(entries) : (size_t)(size-off);
+            rc=dump_read_exact(&list,off,entries,n);
+            if(!rc)rc=agent_dump_progress();
+            for(size_t i=0;!rc && i<n;i+=32) if(!memcmp(entries+i,rights,16)) {ticket_offset=((u64)off+i)*32;break;}
+            if(ticket_offset!=UINT64_MAX)break;
+            off+=n;
+        }
+        fsFileClose(&list);
+    }
+    if(!rc && ticket_offset==UINT64_MAX)rc=MAKERESULT(Module_Libnx,LibnxError_NotFound);
+    FsFile tik;
+    if(!rc) {
+        rc=fsFsOpenFile(&fs,"/ticket.bin",FsOpenMode_Read,&tik);
+        if(!rc) { if(tcap<0x400)rc=MAKERESULT(Module_Libnx,LibnxError_BadInput); else rc=dump_read_exact(&tik,ticket_offset,ticket,0x400); fsFileClose(&tik); }
+    }
+    fsFsClose(&fs); if(rc)return rc;
+    const u8 *t=ticket; u32 sig=((u32)t[0]<<24)|((u32)t[1]<<16)|((u32)t[2]<<8)|t[3];
+    size_t body;
+    switch(sig) { case 0x10000: case 0x10003: body=0x240;break; case 0x10001:case 0x10004:body=0x140;break; case 0x10002:case 0x10005:body=0x80;break; case 0x10006:body=0x40;break; default:return MAKERESULT(Module_Libnx,LibnxError_IncompatSysVer); }
+    if(body+0x180>0x400 || memcmp(t+body+0x160,rights,16))return MAKERESULT(Module_Libnx,LibnxError_IncompatSysVer);
+    /* Preserve optional v2 sections inside the 0x400-byte record. */
+    u32 section_size; memcpy(&section_size,t+body+0x174,4);
+    if(section_size>0x400-body-0x180)return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    *tn=body+0x180+section_size;
+    char issuer[65]; memcpy(issuer,t+body,64);issuer[64]=0;
+    if(!memchr(issuer,0,64) || strncmp(issuer,"Root-",5))return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    rc=dump_save(&fs,0x80000000000000e0ULL); if(rc)return rc;
+    /* Issuer certificates: leaf first, then its CA. Root is a trust anchor. */
+    char *name=strrchr(issuer,'-');
+    while(!rc && name && name>issuer) {
+        char path[FS_MAX_PATH]; snprintf(path,sizeof(path),"/certificate/%s",name+1);
+        FsFile f; rc=fsFsOpenFile(&fs,path,FsOpenMode_Read,&f);
+        if(!rc) { s64 n=0; rc=fsFileGetSize(&f,&n); if(!rc && (n<=0 || (u64)n>ccap-*cn))rc=MAKERESULT(Module_Libnx,LibnxError_BadInput); if(!rc) { rc=dump_read_exact(&f,0,(u8*)cert+*cn,n); if(!rc)*cn+=n; } fsFileClose(&f); }
+        *name=0;name=strrchr(issuer,'-');
+    }
+    fsFsClose(&fs); return rc;
 }

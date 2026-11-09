@@ -1,0 +1,8 @@
+   Compiling swagent v1.31.0 (/private/tmp/swagent)
+error[E0463]: can't find crate for `std`
+  |
+  = note: the `aarch64-unknown-none` target may not be installed
+  = help: consider downloading the target with `rustup target add aarch64-unknown-none`
+
+For more information about this error, try `rustc --explain E0463`.
+error: could not compile `swagent` (lib test) due to 1 previous error

@@ -13,10 +13,11 @@ static LISTENER: AtomicI32 = AtomicI32::new(-1);
 struct Session {
     fd: i32,
     id: u64,
+    sending: bool,
 }
 const CLIENTS: usize = 4;
 static SESSIONS: [Lock<Session>; CLIENTS] =
-    [const { Lock::new(Session { fd: -1, id: 0 }) }; CLIENTS];
+    [const { Lock::new(Session { fd: -1, id: 0, sending: false }) }; CLIENTS];
 fn session(id: u64) -> &'static Lock<Session> {
     &SESSIONS[id as usize % CLIENTS]
 }
@@ -105,16 +106,35 @@ static QUEUE: Lock<Queue> = Lock::new(Queue {
 pub fn retiring() -> bool {
     RETIRING.load(Acquire)
 }
-pub fn reply(id: u64, line: &[u8]) -> Result {
-    session(id).with(|s| {
-        if s.id != id || s.fd < 0 {
-            return Err(Error("client disconnected", 0));
+// Reserve the per-session output lane under the index lock, then release the
+// lock before IO. Disconnect also takes a reservation so fd reuse is safe.
+struct SessionIo { id: u64, fd: i32 }
+impl SessionIo {
+    fn acquire(id: u64) -> Result<Self> {
+        let deadline=now_ms()+2000;
+        loop {
+            let fd=session(id).with(|s| {
+                if s.id!=id || s.fd<0 {return Some(-1);}
+                if s.sending {return None;}
+                s.sending=true; Some(s.fd)
+            });
+            match fd {
+                Some(fd) if fd>=0 => return Ok(Self{id,fd}),
+                Some(_) => return Err(Error("client disconnected",0)),
+                None => {if now_ms()>=deadline {return Err(Error("session output busy",110));} sleep(1);}
+            }
         }
-        let sock = core::mem::ManuallyDrop::new(Socket::new(s.fd));
-        sock.send(line)?;
-        sock.send(b"\r\n")
-    })
+    }
 }
+impl Drop for SessionIo {
+    fn drop(&mut self) {session(self.id).with(|s| {if s.id==self.id {s.sending=false;}});}
+}
+pub fn reply(id: u64, line: &[u8]) -> Result {
+    let lane=SessionIo::acquire(id)?;
+    let sock=core::mem::ManuallyDrop::new(Socket::new(lane.fd));
+    sock.send(line)?; sock.send(b"\r\n")
+}
+
 fn error(id: u64, prefix: &str, e: Error) {
     let mut s = Text::<256>::new();
     let _ = write!(s, "{}: error {} rc={}", prefix, e.0, e.1);
@@ -264,13 +284,13 @@ struct JobState {
     id: u64,
     deadline: u64,
     timed_out: bool,
-    install: bool,
+    command: &'static str,
 }
 static JOB_STATE: Lock<JobState> = Lock::new(JobState {
     id: 0,
     deadline: 0,
     timed_out: false,
-    install: false,
+    command: "command",
 });
 pub extern "C" fn watchdog(_: *mut core::ffi::c_void) {
     while !crate::stopping() {
@@ -288,13 +308,13 @@ pub(crate) fn check_budget() {
         }
         job.timed_out = true;
         crate::budget::cancel();
-        Some((job.id, job.install))
+        Some((job.id, job.command))
     });
-    if let Some((id, install)) = expired {
+    if let Some((id, command)) = expired {
         log::add("worker: wall-clock budget expired; lane quarantined until return");
         error(
             id,
-            if install { "install" } else { "command" },
+            command,
             Error("wall-clock budget", 110),
         );
     }
@@ -307,7 +327,7 @@ fn execute(job: Job) {
             // Nonzero marks an active job; budget owns the progress deadline.
             deadline: 1,
             timed_out: false,
-            install: job.line.str().split_ascii_whitespace().next() == Some("install"),
+            command: match job.line.str().split_ascii_whitespace().next() { Some("install")=>"install", Some("dump")=>"dump", _=>"command" },
         };
     });
     execute_inner(job);
@@ -527,6 +547,16 @@ fn execute_inner(job: Job) {
                 let _ = write!(line, "hash: md5 {}", digest.str());
                 reply(id, line.bytes())?;
             }
+            "dump" => {
+                let raw = words.next().ok_or(Error("usage: dump TITLEID [PATH]",0))?;
+                if raw.len()!=16 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(Error("invalid title ID",0)); }
+                let title=u64::from_str_radix(raw,16).map_err(|_| Error("invalid title ID",0))?;
+                let output=words.next();
+                if words.next().is_some() { return Err(Error("usage: dump TITLEID [PATH]",0)); }
+                crate::dump::path(title,output)?;
+                reply(id,b"dump: starting")?;
+                crate::dump::command(title,output,&mut |line| { let _=reply(id,line.as_bytes()); })?;
+            }
             "install" => {
                 log::add(job.line.str());
                 let url = words
@@ -570,6 +600,11 @@ fn execute_inner(job: Job) {
         if !JOB_STATE.with(|state| state.timed_out) {
             error(id, cmd, e)
         }
+        while let Some(pending)=QUEUE.with(Queue::pop) {
+            error(pending.id,"command",Error("queue cleared after worker error",125));
+        }
+        log::add("worker: error recovered; queue cleared; backing off");
+        sleep(100);
     }
 }
 const DEST: &str = "sdmc:/atmosphere/contents/430000000000000B/exefs.nsp";
@@ -675,15 +710,17 @@ fn update(id: u64, url: &str) -> Result {
     }
 }
 fn disconnect(id: u64) {
-    session(id).with(|s| {
-        if s.id == id && s.fd >= 0 {
-            unsafe {
-                ffi::shutdown(s.fd, 2);
-                ffi::close(s.fd);
-            }
-            s.fd = -1;
+    loop {
+        let fd=session(id).with(|s| {
+            if s.id!=id || s.fd<0 {return Some(-1);}
+            if s.sending {return None;}
+            let fd=s.fd; s.fd=-1; Some(fd)
+        });
+        match fd {
+            Some(fd) => {if fd>=0 {unsafe {ffi::shutdown(fd,2);ffi::close(fd);}} return;}
+            None => sleep(1),
         }
-    })
+    }
 }
 // Pure formatter; u128 arithmetic keeps percentages safe for every u64 input.
 pub(crate) fn format_status(phase: u8, rx: u64, total: u64) -> Text<128> {
@@ -748,13 +785,11 @@ fn receive(id: u64, line: Text<512>) {
     enqueue(id, line);
 }
 fn file_reply(id: u64, cmd: &str, path: &str, body: &[u8]) {
-    let _ = session(id).with(|s| {
-        if s.id != id || s.fd < 0 {
-            return Err(Error("disconnected", 0));
-        }
-        let sock = core::mem::ManuallyDrop::new(Socket::new(s.fd));
-        crate::files::run(&crate::files::Sd, cmd, path, body, &mut |b| sock.send(b))
-    });
+    let _=(|| -> Result {
+        let lane=SessionIo::acquire(id)?;
+        let sock=core::mem::ManuallyDrop::new(Socket::new(lane.fd));
+        crate::files::run(&crate::files::Sd,cmd,path,body,&mut |b|sock.send(b))
+    })();
 }
 const PUT_LIMIT: u64 = crate::files::PUT_MAX as u64;
 struct Upload {
@@ -819,10 +854,9 @@ fn file_line(id: u64, line: &str) -> Result<Option<Upload>> {
         let n = words.next().map(|v| v.parse::<usize>().map_err(|_| Error("usage", 0)))
             .transpose()?.unwrap_or(40);
         if words.next().is_some() { return Err(Error("usage", 0)); }
-        crate::files::tail(path, n, &mut |bytes| session(id).with(|s| {
-            if s.id != id || s.fd < 0 { return Err(Error("disconnected", 0)); }
-            core::mem::ManuallyDrop::new(Socket::new(s.fd)).send(bytes)
-        }))?;
+        let lane=SessionIo::acquire(id)?;
+        let sock=core::mem::ManuallyDrop::new(Socket::new(lane.fd));
+        crate::files::tail(path,n,&mut |bytes|sock.send(bytes))?;
         return Ok(None);
     }
     if cmd == "put" {

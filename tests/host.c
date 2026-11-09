@@ -200,7 +200,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.30-rs"; }
+const char *sa_version(void) { return "swagent-1.31-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
@@ -221,3 +221,15 @@ void sa_jobs_wait(void) { pthread_mutex_lock(&jobs_mutex); while(!jobs_count) pt
 
 int sa_stopping(void) { return 0; }
 void sa_listener_close(int fd) { close(fd); }
+
+uint32_t sa_dump_meta(uint64_t title,uint32_t *storage,void *infos,uint32_t capacity,uint32_t *count) {
+    (void)title;(void)storage;(void)infos;(void)capacity;(void)count;return 2;
+}
+uint32_t sa_dump_read(uint32_t storage,const void *id,uint64_t offset,void *bytes,size_t size) {
+    (void)storage;(void)id;(void)offset;(void)bytes;(void)size;return 2;
+}
+uint32_t sa_dump_ticket(uint32_t storage,const void *infos,uint32_t count,void *rights,void *ticket,size_t tcap,size_t *tn,void *cert,size_t ccap,size_t *cn) {
+    (void)storage;(void)infos;(void)count;(void)rights;(void)ticket;(void)tcap;(void)tn;(void)cert;(void)ccap;(void)cn;return 2;
+}
+
+uint32_t sa_dump_mkdir(const char *p) { char out[1024]; path(p,out); return mkdir(out,0700)==0 || errno==EEXIST ? 0 : errno; }
