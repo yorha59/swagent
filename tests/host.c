@@ -200,7 +200,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.31-rs"; }
+const char *sa_version(void) { return "swagent-1.32-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
@@ -233,3 +233,10 @@ uint32_t sa_dump_ticket(uint32_t storage,const void *infos,uint32_t count,void *
 }
 
 uint32_t sa_dump_mkdir(const char *p) { char out[1024]; path(p,out); return mkdir(out,0700)==0 || errno==EEXIST ? 0 : errno; }
+
+static _Thread_local int health_failure;
+void host_listener_health_failure(int bad) { health_failure=bad; }
+int sa_listener_health(int fd,int stale) {
+    if(health_failure || stale) { close(fd); return 1; }
+    return 0;
+}

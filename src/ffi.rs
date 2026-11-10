@@ -77,6 +77,7 @@ extern "C" {
     pub fn svcSleepThread(ns: i64) -> u32;
     pub fn sa_listen() -> i32;
     pub fn sa_accept(fd: i32) -> i32;
+    pub fn sa_listener_health(fd: i32, stale: i32) -> i32;
     pub fn sa_connect(host: *const c_char, port: *const c_char) -> i32;
     pub fn sa_timeout(fd: i32, secs: i32);
     pub fn sa_errno() -> i32;

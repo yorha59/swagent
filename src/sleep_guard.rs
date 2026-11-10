@@ -53,7 +53,7 @@ fn saved() -> Result<ffi::SleepSettings> {
     Ok(original)
 }
 pub(crate) fn cancel() {
-    crate::io::remove(PATH);
+    let _ = crate::io::remove(PATH);
 }
 pub(crate) fn begin() -> Result {
     unsafe {

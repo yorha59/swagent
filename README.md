@@ -225,11 +225,11 @@ error, never proof that a partial file is complete. When the original total is
 unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 
-### Manual hbmenu edition (1.31)
+### Manual hbmenu edition (1.32)
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. After binding, the console
-prints `swagent-1.31-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
+prints `swagent-1.32-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
 The listener binds all interfaces. If the sysmodule owns port 6000, the NRO
 shows a busy message and retries every five seconds, taking over automatically
 when the port becomes available. PLUS displays the HOME instruction while waiting.
@@ -242,7 +242,7 @@ handlers and the reusable 4 MiB install chunk. The resident edition uses its
 applet/HID/FS startup. It initializes the console before starting network workers,
 skips resident sleep-setting recovery, firmware probing and the SD log writer,
 and prints the endpoint only from the console thread.
-`version` reports `swagent-1.31-rs nro` or `swagent-1.31-rs sys`.
+`version` reports `swagent-1.32-rs nro` or `swagent-1.32-rs sys`.
 The `update` command retains its resident sysmodule update behavior.
 
 `make nro` uses official devkitPro `elf2nro` and libnx crt0/relocation handling.
@@ -329,7 +329,7 @@ console after each status print and every 100ms while polling PLUS. Bind
 failures retry every five seconds; a busy port shows the sysmodule warning,
 and successful takeover displays the LAN IP and port.
 
-Version 1.31 (`swagent-1.31-rs`) leaves NRO teardown to the system. Press HOME
+Version 1.32 (`swagent-1.32-rs`) leaves NRO teardown to the system. Press HOME
 to exit. PLUS only prints `press HOME to exit` and refreshes the console; main
 never returns, including when the applet loop reports exit or startup fails.
 Workers keep running until system teardown. Bare `quit` disconnects the client.
@@ -348,7 +348,7 @@ are refused. No wildcard expansion or recursive deletion is performed.
 selected bytes between `tail: begin` and `tail: end`. Outbound connections retain
 the 15-second per-attempt poll timeout and close failed sockets before retrying.
 
-### Installed-title NSP export (1.31)
+### Installed-title NSP export (1.32)
 
 `dump <16-hex-digit-titleid> [SD-path]` runs on the install worker lane and
 exports exactly that base or update title. The default is
@@ -374,3 +374,20 @@ cc -Wall -Wextra -c tests/host.c -o build/host.o
 RUSTFLAGS="-C link-arg=$PWD/build/host.o -A dead_code" cargo test --target aarch64-apple-darwin
 DEVKITPRO=~/devkitpro DEVKITA64=~/devkitpro/devkitA64 make
 ```
+
+### Listener and persistent log recovery (1.32)
+
+A separate low priority listener watchdog checks socket metadata every 30 seconds.
+A bad listener or an accept loop without a heartbeat for 60 seconds triggers
+shutdown/close and a fresh socket/bind/listen cycle. Failed binds retry forever
+with exponential backoff capped at 30 seconds (initially 250 ms for sysmodule,
+5 seconds for NRO). Recovery stages are queued to the persistent log.
+
+Clients must finish a command line within 60 seconds of connecting or completing
+the previous line; partial input does not renew this deadline. Upload bodies keep
+the existing 30-second receive timeout. The log writer reopens its handle once
+after 10 consecutive failures and truncates before exceeding 1 MiB; the in-memory
+ring continues recording when SD writes fail. These mechanisms handle returned
+errors and stalled accept calls that shutdown can release; they cannot guarantee
+recovery from a permanently blocked BSD/FS service IPC. See PR_DESCRIPTION.md for
+the socket ownership audit and host regression coverage.

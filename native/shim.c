@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.31-rs"; }
+const char *sa_version(void) { return "swagent-1.32-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -75,7 +75,7 @@ int main(void) {
                 printf("port 6000 busy - sysmodule already running\npress HOME to exit\n");
                 consoleUpdate(NULL);
             } else if (status < 0) {
-                printf("listener failed: errno=%d; retrying every 5s\npress HOME to exit\n", -status);
+                printf("listener failed: errno=%d; retrying with backoff (up to 30s)\npress HOME to exit\n", -status);
                 consoleUpdate(NULL);
             }
             announced=status;
@@ -136,24 +136,39 @@ static void log_writer(void *arg) {
         if(size>0) { fseek(old,size>16384?size-16384:0,SEEK_SET); size_t n=fread(bytes,1,sizeof(bytes),old); log_cache(bytes,n); }
         fclose(old);
     }
+    FILE *f=NULL;
+    unsigned failures=0;
+    bool reopened=false;
     for(;;) {
         char line[768]={0};
         if(!atomic_flag_test_and_set(&log_lock)) {
             if(log_count) { memcpy(line,log_queue[log_head],sizeof(line)); log_head=(log_head+1)%128; log_count--; }
             atomic_flag_clear(&log_lock);
         }
-        if(!line[0]) { if (sa_stopping()) return; svcSleepThread(10000000); continue; }
-        FILE *f=fopen("sdmc:/switch/swagent.log","ab+");
-        if(!f) continue;
-        fseek(f,0,SEEK_END); long size=ftell(f);
-        if(size>256*1024) {
-            fclose(f); f=fopen("sdmc:/switch/swagent.log","wb");
-            if(!f)continue;
-            if(!atomic_flag_test_and_set(&log_lock)) { log_tail_len=0; atomic_flag_clear(&log_lock); }
-        }
+        if(!line[0]) { if (sa_stopping()) { if(f) fclose(f); return; } svcSleepThread(10000000); continue; }
+        if(!f) f=fopen("sdmc:/switch/swagent.log","ab+");
         size_t n=strlen(line);
-        if(fwrite(line,1,n,f)==n && fflush(f)==0) log_cache(line,n);
-        fclose(f);
+        bool ok=false;
+        if(f) {
+            bool positioned=fseek(f,0,SEEK_END)==0;
+            long size=positioned ? ftell(f) : -1;
+            if(size>=0 && (unsigned long)size+n>1024*1024) {
+                fclose(f); f=fopen("sdmc:/switch/swagent.log","wb");
+                if(!atomic_flag_test_and_set(&log_lock)) { log_tail_len=0; atomic_flag_clear(&log_lock); }
+            }
+            if(f && size>=0) ok=fwrite(line,1,n,f)==n && fflush(f)==0;
+        }
+        if(ok) { log_cache(line,n); failures=0; reopened=false; }
+        else if(++failures>=10 && !reopened) {
+            if(f) fclose(f);
+            f=fopen("sdmc:/switch/swagent.log","ab+");
+            reopened=true;
+            /* Retry this line once after reopening; later lines still reach
+             * the Rust ring even if SD remains unavailable. */
+            if(f && fwrite(line,1,n,f)==n && fflush(f)==0) {
+                log_cache(line,n); failures=0; reopened=false;
+            }
+        }
     }
 }
 static void sa_trace(const char *step,int rc) {
@@ -170,8 +185,8 @@ void sa_jobs_wait(void) {
     semaphoreWait(&jobs_ready);
 #endif
 }
-static Thread threads[6];
-static bool thread_started[6];
+static Thread threads[7];
+static bool thread_started[7];
 static Mutex listener_lock;
 static int listener_fd=-1;
 /* Includes sockets still connecting, so exit can interrupt every network lane. */
@@ -206,10 +221,10 @@ void sa_listener_close(int fd) {
     mutexUnlock(&listener_lock);
 }
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
-    if (slot >= 6) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    if (slot >= 7) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
     if (sa_stopping()) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
     sa_trace("thread-spawn-start",0);
-    Result rc = threadCreate(&threads[slot], fn, arg, NULL, 0x18000, 44, -2);
+    Result rc = threadCreate(&threads[slot], fn, arg, NULL, 0x18000, slot==6 ? 48 : 44, -2);
     if (!rc) { rc = threadStart(&threads[slot]); if (rc) threadClose(&threads[slot]); }
     if (!rc) thread_started[slot]=true;
     char step[40]; snprintf(step,sizeof(step),"thread-%u",slot); sa_trace(step,rc);
@@ -282,13 +297,19 @@ static int listen_socket(void) {
     int fd = socket(AF_INET,SOCK_STREAM,0); if (fd < 0) return -errno;
     int one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
     struct sockaddr_in a = {.sin_family=AF_INET,.sin_port=htons(6000),.sin_addr={INADDR_ANY}};
-    if (bind(fd,(void*)&a,sizeof(a)) < 0 || listen(fd,4) < 0) {
+    sa_trace("listener-socket",0);
+    if (bind(fd,(void*)&a,sizeof(a)) < 0) {
         int e=errno; sa_trace("listener-bind",-e); close(fd); return -e;
     }
+    sa_trace("listener-bind",0);
+    if (listen(fd,4) < 0) {
+        int e=errno; sa_trace("listener-listen",-e); close(fd); return -e;
+    }
+    sa_trace("listener-listen",0);
     /* Poll accept so worker connect failures can wake the recovery loop even
      * when no client is connected. Do not rely on accept honoring RCVTIMEO. */
     if (fcntl(fd,F_SETFL,O_NONBLOCK) < 0) { int e=errno; close(fd); return -e; }
-    sa_trace("listener-bind",0); return fd;
+    sa_trace("listener-bind-listen",0); return fd;
 }
 int sa_listen(void) {
     mutexLock(&listener_lock);
@@ -299,6 +320,29 @@ int sa_listen(void) {
     atomic_store(&nro_listener_status,result < 0 ? result : 1);
 #endif
     return result;
+}
+/* Probe listener metadata, not recv(0): recv on a listening socket is invalid.
+ * Only close the registered listener under its ownership lock. */
+int sa_listener_health(int fd, int stale) {
+    mutexLock(&listener_lock);
+    int bad=listener_fd!=fd;
+    if (!bad) {
+        struct sockaddr_in addr; socklen_t len=sizeof(addr);
+        int accepting=0, error=0; socklen_t opt=sizeof(int);
+        bad=stale || getsockname(fd,(void*)&addr,&len)<0 ||
+            getsockopt(fd,SOL_SOCKET,SO_ACCEPTCONN,&accepting,&opt)<0 || !accepting;
+        opt=sizeof(int);
+        if (!bad) bad=getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&opt)<0 || error;
+        if (bad) {
+            sa_trace("listener-watchdog-shutdown-start",0);
+            shutdown(fd,SHUT_RDWR);
+            sa_trace("listener-watchdog-close-start",0);
+            close(fd); listener_fd=-1;
+            sa_trace("listener-watchdog-closed",0);
+        }
+    }
+    mutexUnlock(&listener_lock);
+    return bad;
 }
 int sa_accept(int fd) {
     int client=accept(fd,NULL,NULL);

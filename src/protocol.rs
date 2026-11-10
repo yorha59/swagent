@@ -6,7 +6,7 @@ use crate::{
 };
 use core::{
     fmt::Write,
-    sync::atomic::{AtomicBool, AtomicI32, Ordering::*},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::*},
 };
 static RETIRING: AtomicBool = AtomicBool::new(false);
 static LISTENER: AtomicI32 = AtomicI32::new(-1);
@@ -615,7 +615,7 @@ pub(crate) fn apply_update(url: &str) -> Result<u64> {
     struct Clean;
     impl Drop for Clean {
         fn drop(&mut self) {
-            io::remove(TMP)
+            let _ = io::remove(TMP);
         }
     }
     let _clean = Clean;
@@ -662,7 +662,7 @@ pub(crate) fn apply_update(url: &str) -> Result<u64> {
         }
     }
     // Keep a recoverable previous image until launch succeeds.
-    io::remove(BACKUP);
+    let _ = io::remove(BACKUP);
     io::rename(DEST, BACKUP)?;
     if let Err(e) = io::rename(TMP, DEST) {
         let _ = io::rename(BACKUP, DEST);
@@ -671,7 +671,7 @@ pub(crate) fn apply_update(url: &str) -> Result<u64> {
     let mut pid = 0;
     let launch = unsafe { ffi::sa_launch(&mut pid) };
     if launch != 0 {
-        io::remove(DEST);
+        let _ = io::remove(DEST);
         let _ = io::rename(BACKUP, DEST);
         return Err(Error("launch replacement", launch));
     }
@@ -825,7 +825,7 @@ impl Drop for Upload {
     fn drop(&mut self) {
         self.file.take();
         if !self.complete {
-            io::remove(self.path.str());
+            let _ = io::remove(self.path.str());
         }
     }
 }
@@ -906,12 +906,21 @@ pub extern "C" fn client_worker(arg: *mut core::ffi::c_void) {
         CLIENT_READY[slot].store(false, Release);
     }
 }
-fn client_loop(fd: i32, id: u64) {
+fn client_loop(fd: i32, id: u64) { client_loop_timeout(fd, id, 60_000); }
+fn client_loop_timeout(fd: i32, id: u64, command_timeout: u64) {
     let mut frame = Frame::new();
     let mut upload: Option<Upload> = None;
     let mut last_input = now_ms();
+    let mut command_started = last_input;
+    struct Connection(u64);
+    impl Drop for Connection { fn drop(&mut self) { disconnect(self.0); } }
+    let _connection = Connection(id);
     'client: loop {
         if crate::stopping() { break; }
+        if upload.is_none() && now_ms().saturating_sub(command_started) >= command_timeout {
+            log::add("client: command deadline expired; disconnecting");
+            break;
+        }
         if upload.is_some() && now_ms() - last_input >= 30_000 {
             let _ = reply(id, b"put: error timeout/short read");
             break;
@@ -952,6 +961,7 @@ fn client_loop(fd: i32, id: u64) {
                         let _ = write!(msg, "put: ok {}", u.used);
                         let _ = reply(id, msg.bytes());
                         upload = None;
+                        command_started = now_ms();
                     }
                     Ok(false) => {}
                     Err(e) => {
@@ -962,6 +972,7 @@ fn client_loop(fd: i32, id: u64) {
                 continue;
             }
             if let Some(result) = frame.feed(*byte) {
+                command_started = now_ms();
                 match result {
                     Ok(line) if line.len > 0 => {
                         let cmd = line.str().split_ascii_whitespace().next().unwrap_or("");
@@ -991,7 +1002,6 @@ fn client_loop(fd: i32, id: u64) {
         }
     }
     drop(upload); // Close and delete partial uploads before accepting another client.
-    disconnect(id);
     log::add("client disconnected");
 }
 fn admit(fd: i32) -> bool {
@@ -1026,31 +1036,61 @@ fn listener_step(server: i32) -> bool {
     unsafe {
         ffi::sa_timeout(fd, 2);
     }
-    if !admit(fd) {
-        // Capacity is fixed. Do not wait behind an occupied client lane.
-        unsafe {
-            ffi::sa_send(fd, b"error: busy\r\n".as_ptr(), 13, 0);
-            ffi::close(fd);
-        }
+    let socket = Socket::new(fd);
+    if admit(fd) {
+        // Ownership transfers to the session's Connection guard.
+        core::mem::forget(socket);
+    } else {
+        // Capacity is fixed. The unadmitted socket closes through Drop.
+        unsafe { ffi::sa_send(fd, b"error: busy\r\n".as_ptr(), 13, 0); }
         log::add("listener: client capacity reached");
     }
     true
 }
+static LISTENER_DELAY: AtomicU64 = AtomicU64::new(250);
+static LISTENER_BEAT: AtomicU64 = AtomicU64::new(0);
+static LISTENER_RESTART: AtomicBool = AtomicBool::new(false);
+pub(crate) fn listener_check(now: u64) {
+    let fd = LISTENER.load(Acquire);
+    if fd < 0 || retiring() { return; }
+    let stale = now.saturating_sub(LISTENER_BEAT.load(Acquire)) >= 60_000;
+    if unsafe { ffi::sa_listener_health(fd, stale as i32) } != 0 {
+        log::add("listener watchdog: unhealthy/stalled; closed; requesting fresh socket");
+        LISTENER_RESTART.store(true, Release);
+    }
+}
+pub extern "C" fn listener_watchdog(_: *mut core::ffi::c_void) {
+    while !crate::stopping() {
+        sleep(30_000);
+        listener_check(now_ms());
+    }
+}
 fn serve_step(server: &mut i32) {
+    LISTENER_BEAT.store(now_ms(), Release);
+    if LISTENER_RESTART.swap(false, AcqRel) {
+        LISTENER.store(-1, Release);
+        if *server >= 0 { unsafe { ffi::sa_listener_close(*server); } }
+        *server = -1;
+    }
     if *server < 0 {
         *server = unsafe { ffi::sa_listen() };
         if *server < 0 {
             let mut line = Text::<96>::new();
             let _ = write!(line, "listener: listen failed errno={}; retrying", -*server);
             log::add(line.str());
-            if crate::is_nro() {
-                // Main thread polls PLUS and refreshes the console independently.
-                for _ in 0..50 { if crate::stopping() { return; } sleep(100); }
-            } else {
-                sleep(250);
+            let delay = LISTENER_DELAY.load(Relaxed).max(if crate::is_nro() { 5000 } else { 250 });
+            // Preserve NRO's five-second initial bind retry and poll shutdown.
+            let mut remaining = delay;
+            while remaining > 0 {
+                if crate::stopping() { return; }
+                let step = remaining.min(100);
+                sleep(step);
+                remaining -= step;
             }
+            LISTENER_DELAY.store((delay * 2).min(30_000), Relaxed);
             return;
         }
+        LISTENER_DELAY.store(250, Relaxed);
         LISTENER.store(*server, Release);
         log::add("listening :6000");
     }
@@ -1208,4 +1248,11 @@ pub fn test_worker_start() {
 pub fn test_worker_stop() {
     STOP_WORKER.store(true, Release);
     unsafe { ffi::sa_jobs_signal(); }
+}
+
+#[cfg(test)]
+pub fn test_client_timeout(slot: usize, timeout: u64) {
+    let (fd,id) = SESSIONS[slot].with(|s| (s.fd,s.id));
+    client_loop_timeout(fd,id,timeout);
+    CLIENT_READY[slot].store(false,Release);
 }
