@@ -43,6 +43,8 @@ extern "C" {
     pub fn sa_heartbeat_listen() -> i32;
     pub fn sa_heartbeat_accept(fd: i32) -> i32;
     pub fn sa_heartbeat_health(fd: i32) -> i32;
+    pub fn sa_reboot() -> u32;
+    pub fn sa_reboot_log() -> u32;
     pub fn sa_persist(p: *const u8, n: usize);
     pub fn sa_log_tail(p: *mut u8, n: usize) -> usize;
     pub fn sa_installed(offset: i32, title: *mut u64, name: *mut u8, capacity: usize, count: *mut i32) -> u32;

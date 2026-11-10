@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.33-rs sys\r\n"),
+        ("version", "swagent-1.34-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1760,7 +1760,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.33-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.34-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1775,7 +1775,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.33-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.34-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -2373,4 +2373,66 @@ fn stage_span_skips_dead_logger_and_watchdog_reports_stalled_stage() {
         if line.contains("title=0000000000000133") && line.contains("progress=") {progress+=1;}
     });
     assert_eq!(progress,1);
+}
+
+#[test]
+fn reboot_receipt_and_eof_precede_delayed_bpc() {
+    use std::os::unix::{io::IntoRawFd, net::UnixStream};
+    use std::time::{Duration, Instant};
+    unsafe extern "C" {
+        fn host_reboot_reset();
+        fn host_reboot_stat(n: i32) -> i32;
+    }
+    let _guard = SERIAL.lock().unwrap();
+    unsafe { host_reboot_reset(); }
+    let (server, mut client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.into_raw_fd());
+    // Exercise the real command dispatch and production 500ms delay.
+    protocol::test_receive("reboot");
+    let worker = std::thread::spawn(protocol::test_run_one);
+    let mut receipt = String::new();
+    client.read_to_string(&mut receipt).unwrap();
+    let eof = Instant::now();
+    assert_eq!(receipt, "reboot: ok\r\n");
+    assert_eq!(unsafe { host_reboot_stat(1) }, 1);
+    assert_eq!(unsafe { host_reboot_stat(0) }, 0);
+    worker.join().unwrap();
+    assert!(eof.elapsed() >= Duration::from_millis(400));
+    assert_eq!(unsafe { host_reboot_stat(0) }, 1);
+    let mut logged = String::new();
+    log::dump(1000, |s| logged.push_str(core::str::from_utf8(s).unwrap()));
+    assert!(logged.contains("reboot: bpc returned rc=91"));
+}
+
+#[test]
+fn reboot_rejects_arguments_and_failed_audit_without_bpc() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::{io::IntoRawFd, net::UnixStream};
+    unsafe extern "C" {
+        fn host_reboot_reset();
+        fn host_reboot_stat(n: i32) -> i32;
+        fn host_reboot_log_failure(rc: i32);
+    }
+    let _guard = SERIAL.lock().unwrap();
+    unsafe { host_reboot_reset(); }
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    let fd = server.into_raw_fd();
+    protocol::test_session(fd);
+    let mut client = BufReader::new(client);
+    for (command, expected) in [
+        ("reboot extra", "usage: reboot"),
+        ("reboot", "persist reboot request"),
+    ] {
+        unsafe { host_reboot_log_failure(73); }
+        protocol::test_receive(command);
+        protocol::test_run_one();
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert!(line.contains(expected), "{line}");
+        assert!(!line.contains("reboot: ok"));
+        assert_eq!(unsafe { host_reboot_stat(0) }, 0);
+    }
+    unsafe { ffi::close(fd); host_reboot_reset(); }
 }

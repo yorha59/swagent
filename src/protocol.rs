@@ -343,6 +343,10 @@ fn execute_inner(job: Job) {
     let cmd = words.next().unwrap_or("");
     let result = (|| -> Result {
         match cmd {
+            "reboot" => {
+                if words.next().is_some() { return Err(Error("usage: reboot", 0)); }
+                reboot(id, 500)?;
+            }
             "update" => {
                 let url = words.next().ok_or(Error("usage: update URL", 0))?;
                 if words.next().is_some() {
@@ -678,6 +682,19 @@ pub(crate) fn apply_update(url: &str) -> Result<u64> {
     }
     Ok(pid)
 }
+pub(crate) fn reboot(id: u64, delay_ms: u64) -> Result {
+    rc(unsafe { ffi::sa_reboot_log() }, "persist reboot request")?;
+    // Receipt confirms acceptance; the actual bpc request happens after EOF.
+    let _ = reply(id, b"reboot: ok");
+    disconnect(id);
+    sleep(delay_ms);
+    let result = unsafe { ffi::sa_reboot() };
+    let mut line = Text::<128>::new();
+    let _ = write!(line, "reboot: bpc returned rc={result}");
+    log::add(line.str());
+    Ok(())
+}
+
 fn update(id: u64, url: &str) -> Result {
     apply_update(url)?;
     RETIRING.store(true, Release);
