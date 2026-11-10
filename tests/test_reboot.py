@@ -14,25 +14,35 @@ class RebootTest(unittest.TestCase):
 #include <errno.h>
 typedef unsigned Result;
 #define R_FAILED(rc) ((rc)!=0)
-static int stage, init_rc, reboot_rc, exits, fail_write, fail_flush;
+static int stage, init_rc, reboot_rc, exits;
 static Result bpcInitialize(void){assert(stage==0);stage=1;return init_rc;}
 static Result bpcRebootSystem(void){assert(stage==1);stage=2;return reboot_rc;}
 static void bpcExit(void){assert(stage==2);exits++;}
-static int fake_mkdir(const char *p,int mode){(void)p;(void)mode;return 0;}
-static FILE *fake_open(const char *p,const char *m){assert(strstr(p,"swagent.log"));assert(!strcmp(m,"ab"));return (FILE*)1;}
-static size_t fake_write(const void *p,size_t s,size_t n,FILE *f){(void)s;(void)f;assert(!memcmp(p,"reboot: requested\n",n));assert(stage==0);stage=1;return fail_write?0:n;}
-static int fake_flush(FILE *f){(void)f;assert(stage==1);stage=2;return fail_flush?-1:0;}
-static int fake_close(FILE *f){(void)f;assert(stage==2);stage=3;return 0;}
-#define mkdir fake_mkdir
-#define fopen fake_open
-#define fwrite fake_write
-#define fflush fake_flush
-#define fclose fake_close
+typedef long long s64;
+typedef struct { int unused; } FsFileSystem;
+typedef struct { int unused; } FsFile;
+static FsFileSystem sd;
+static int no_sd, open_rc, size_rc, write_rc, closes;
+#define Module_Libnx 1
+#define LibnxError_NotFound 2
+#define MAKERESULT(m,d) (((m)<<9)|(d))
+#define FsOpenMode_Write 2
+#define FsOpenMode_Append 4
+#define FsWriteOption_Flush 1
+static FsFileSystem *fsdevGetDeviceFileSystem(const char *p){assert(!strcmp(p,"sdmc"));return no_sd?NULL:&sd;}
+static Result fsFsCreateDirectory(FsFileSystem *fs,const char *p){assert(fs==&sd && !strcmp(p,"/switch"));return 99;}
+static Result fsFsCreateFile(FsFileSystem *fs,const char *p,s64 size,int flags){assert(fs==&sd && !strcmp(p,"/switch/swagent.log") && size==0 && flags==0);return 99;}
+static Result fsFsOpenFile(FsFileSystem *fs,const char *p,int mode,FsFile *f){(void)f;assert(fs==&sd && !strcmp(p,"/switch/swagent.log") && mode==(FsOpenMode_Write|FsOpenMode_Append));return open_rc;}
+static Result fsFileGetSize(FsFile *f,s64 *size){(void)f;*size=123;return size_rc;}
+static Result fsFileWrite(FsFile *f,s64 offset,const void *p,size_t n,int flags){(void)f;assert(offset==123 && n==18 && !memcmp(p,"reboot: requested\n",n) && flags==FsWriteOption_Flush);assert(stage==0);stage=1;return write_rc;}
+static void fsFileClose(FsFile *f){(void)f;closes++;}
 ''' + function('Result sa_reboot(void)') + '\n' + function('Result sa_reboot_log(void)') + r'''
 int main(void){
-    assert(sa_reboot_log()==0 && stage==3);
-    stage=0;fail_write=1;assert(sa_reboot_log()!=0 && stage==3);
-    stage=0;fail_write=0;fail_flush=1;assert(sa_reboot_log()!=0 && stage==3);
+    assert(sa_reboot_log()==0 && stage==1 && closes==1);
+    stage=0;write_rc=73;assert(sa_reboot_log()==73 && closes==2);
+    stage=0;write_rc=0;size_rc=74;assert(sa_reboot_log()==74 && stage==0 && closes==3);
+    size_rc=0;open_rc=75;assert(sa_reboot_log()==75 && stage==0 && closes==3);
+    open_rc=0;no_sd=1;assert(sa_reboot_log()==MAKERESULT(Module_Libnx,LibnxError_NotFound) && closes==3);
     stage=0;init_rc=42;assert(sa_reboot()==42 && stage==1 && exits==0);
     stage=0;init_rc=0;reboot_rc=91;assert(sa_reboot()==91 && stage==2 && exits==1);
     stage=0;reboot_rc=0;assert(sa_reboot()==0 && exits==2);
