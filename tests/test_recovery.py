@@ -14,7 +14,7 @@ class RecoveryTest(unittest.TestCase):
             subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(binary)], check=True)
             subprocess.run([str(binary)], check=True, timeout=5)
 
-    def test_writer_reopen_rotation_and_permanent_failure(self):
+    def test_writer_short_handles_rotation_and_recovery(self):
         self.run_c(r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -27,25 +27,30 @@ static atomic_ullong log_beat;
 static unsigned long long sa_now_ms(void){return 1;}
 static char log_queue[128][768],log_tail[16384];
 static size_t log_head,log_count,log_tail_len;
-static int opens,closes,writes,flushes,fail_until,rotates;
+static int opens,closes,writes,flushes,fail_until,rotates,active;
+static int open_fail,rotate_fail,seek_fail,tell_fail,flush_fail,close_fail;
 static long size;
 static FILE *fake_open(const char *p,const char *m) {
     (void)p;
     if(!strcmp(m,"rb"))return NULL;
+    assert(!active); /* Model Switch exclusive open, including readers. */
     opens++;
-    if(!strcmp(m,"wb")){rotates++;size=0;}
+    if(open_fail)return NULL;
+    if(!strcmp(m,"wb")){if(rotate_fail)return NULL;rotates++;size=0;}
+    else assert(!strcmp(m,"ab"));
+    active=1;
     return (FILE*)1;
 }
-static int fake_close(FILE *f){assert(f);closes++;return 0;}
-static int fake_seek(FILE *f,long off,int whence){(void)f;(void)off;(void)whence;return 0;}
-static long fake_tell(FILE *f){(void)f;return size;}
+static int fake_close(FILE *f){assert(f && active);active=0;closes++;return close_fail?-1:0;}
+static int fake_seek(FILE *f,long off,int whence){(void)f;(void)off;(void)whence;return seek_fail?-1:0;}
+static long fake_tell(FILE *f){(void)f;return tell_fail?-1:size;}
 static size_t fake_read(void *p,size_t s,size_t n,FILE *f){(void)p;(void)s;(void)n;(void)f;return 0;}
 static size_t fake_write(const void *p,size_t s,size_t n,FILE *f){
     (void)p;(void)s;(void)f;writes++;if(writes<=fail_until)return 0;size+=n;return n;
 }
-static int fake_flush(FILE *f){(void)f;flushes++;return 0;}
-static int sa_stopping(void){return log_count==0;}
-static void svcSleepThread(long n){(void)n;}
+static int fake_flush(FILE *f){(void)f;flushes++;return flush_fail?-1:0;}
+static int sa_stopping(void){assert(!active);return log_count==0;}
+static void svcSleepThread(long n){(void)n;assert(!active);}
 #define fopen fake_open
 #define fclose fake_close
 #define fseek fake_seek
@@ -55,16 +60,37 @@ static void svcSleepThread(long n){(void)n;}
 #define fflush fake_flush
 ''' + function('static void log_cache(const char *p,size_t n)') + '\n' + function('static void log_writer(void *arg)') + r'''
 static void reset(int count){
+    assert(!active);
+    open_fail=rotate_fail=seek_fail=tell_fail=flush_fail=close_fail=0;
+    fail_until=0;
     log_head=log_tail_len=0;log_count=count;opens=closes=writes=flushes=rotates=0;size=0;
     for(int i=0;i<count;i++)strcpy(log_queue[i],"hello\n");
 }
 int main(void){
     reset(12);fail_until=10;log_writer(NULL);
-    assert(opens==2 && closes==2 && writes==13 && log_tail_len==18);
+    assert(opens==12 && closes==12 && writes==12 && log_tail_len==12);
     reset(30);fail_until=100;log_writer(NULL);
-    assert(opens==2 && closes==2 && writes==31 && log_tail_len==0);
+    assert(opens==30 && closes==30 && writes==30 && log_tail_len==0);
     reset(1);fail_until=0;size=1024*1024-2;log_writer(NULL);
     assert(rotates==1 && size==6 && log_tail_len==6 && closes==2);
+    reset(1);size=1024*1024-6;log_writer(NULL);
+    assert(!rotates && size==1024*1024 && closes==1);
+    reset(2);size=1024*1024-6;log_writer(NULL);
+    assert(rotates==1 && size==6 && log_tail_len==6 && closes==3);
+    reset(1);size=1024*1024+10;rotate_fail=1;log_tail_len=7;log_writer(NULL);
+    assert(!writes && closes==1 && log_tail_len==7);
+    reset(1);open_fail=1;log_writer(NULL);
+    assert(!writes && !closes && !log_tail_len);
+    reset(1);seek_fail=1;log_writer(NULL);
+    assert(!writes && closes==1 && !log_tail_len);
+    reset(1);tell_fail=1;log_writer(NULL);
+    assert(!writes && closes==1 && !log_tail_len);
+    reset(1);flush_fail=1;log_writer(NULL);
+    assert(writes==1 && closes==1 && !log_tail_len);
+    reset(1);close_fail=1;log_writer(NULL);
+    assert(writes==1 && closes==1 && !log_tail_len);
+    reset(1);log_writer(NULL);
+    assert(writes==1 && closes==1 && log_tail_len==6);
     return 0;
 }
 ''')
