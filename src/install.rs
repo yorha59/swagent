@@ -498,7 +498,9 @@ fn install_inner(
     }
     let mut chunk = Buffer::new(CHUNK)?;
     crate::log::add("install: downloading");
+    let download = crate::log::Span::new("install", 0, "download");
     http::download_install(url, NSP, &mut chunk, 64 * 1024 * 1024 * 1024)?;
+    drop(download);
     if let Some(expected) = expected {
         let got = crate::md5::file(NSP, &mut chunk, u64::MAX)?;
         if got.str() != expected {
@@ -528,6 +530,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     }
     let block_len = chunk.len().min(IO_BLOCK);
     let chunk = &mut chunk[..block_len];
+    let lookup = crate::log::Span::new("install", 0, "lookup");
     let mut f = File::open(NSP, false)?;
     let p = Pfs::open(&mut f)?;
     for i in 0..p.count {
@@ -538,7 +541,11 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
             .map_err(|_| Error("file log length", 0))?;
         crate::log::add(line.str());
     }
+    drop(lookup);
+    let ticket_span = crate::log::Span::new("install", 0, "ticket");
     ticket(&mut f, &p)?;
+    drop(ticket_span);
+    let metadata = crate::log::Span::new("install", 0, "cnmt");
     let mut cnca = None;
     for i in 0..p.count {
         let e = p.entry(i)?;
@@ -641,6 +648,8 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     drop(mount);
     drop(stage);
     let m = meta(&data)?;
+    drop(metadata);
+    let locate = crate::log::Span::new("install", m.key.id, "ncm-lookup");
     let mut own = [0u8; 24];
     own[..16].copy_from_slice(&id);
     own[16..20].copy_from_slice(&(cnca.size as u32).to_le_bytes());
@@ -686,6 +695,8 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
     )?;
     let mut db = Database(db);
     crate::log::add("install: writing contents");
+    drop(locate);
+    let mut content_span = crate::log::Span::new("install", m.key.id, "content-read");
     let mut writing = WriteProgress::new(total);
     for info in core::iter::once(&own[..]).chain(m.contents.chunks_exact(56).map(|c| &c[32..])) {
         if info[22] == 6 {
@@ -703,6 +714,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
         )?;
         if present {
             writing.advance(e.size)?;
+            content_span.progress(writing.done,total);
             continue;
         }
         let mut ph = [0; 16];
@@ -755,6 +767,7 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
                 "write placeholder",
             )?;
             writing.advance(n as u64)?;
+            content_span.progress(writing.done,total);
             off += n as u64;
         }
         rc(
@@ -766,6 +779,8 @@ pub(crate) fn install_downloaded(storage: u32, chunk: &mut [u8]) -> Result<u64> 
         )?;
         crate::budget::progress()?;
     }
+    drop(content_span);
+    let _finish = crate::log::Span::new("install", m.key.id, "finalize");
     let count = 1 + m.contents.chunks_exact(56).filter(|c| c[54] != 6).count();
     let size = 8 + m.ext.len() + count * 24 + m.metas.len() + m.extended;
     if size > META_CAP {

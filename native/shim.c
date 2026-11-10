@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.32-rs"; }
+const char *sa_version(void) { return "swagent-1.33-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -102,6 +102,8 @@ static size_t log_head, log_count, log_tail_len;
 static Thread log_thread;
 static bool log_started;
 u64 sa_now_ms(void);
+static atomic_ullong log_beat;
+int sa_log_alive(void) { u64 beat=atomic_load(&log_beat); return beat && sa_now_ms()-beat<60000; }
 void sa_persist(const char *p, size_t n) {
     if (atomic_flag_test_and_set(&log_lock)) return;
     if (log_count<128) {
@@ -140,6 +142,7 @@ static void log_writer(void *arg) {
     unsigned failures=0;
     bool reopened=false;
     for(;;) {
+        atomic_store(&log_beat,sa_now_ms());
         char line[768]={0};
         if(!atomic_flag_test_and_set(&log_lock)) {
             if(log_count) { memcpy(line,log_queue[log_head],sizeof(line)); log_head=(log_head+1)%128; log_count--; }
@@ -185,8 +188,8 @@ void sa_jobs_wait(void) {
     semaphoreWait(&jobs_ready);
 #endif
 }
-static Thread threads[7];
-static bool thread_started[7];
+static Thread threads[8];
+static bool thread_started[8];
 static Mutex listener_lock;
 static int listener_fd=-1;
 /* Includes sockets still connecting, so exit can interrupt every network lane. */
@@ -221,7 +224,7 @@ void sa_listener_close(int fd) {
     mutexUnlock(&listener_lock);
 }
 u32 sa_spawn(unsigned slot, void (*fn)(void*), void *arg) {
-    if (slot >= 7) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    if (slot >= 8) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
     if (sa_stopping()) return MAKERESULT(Module_Libnx,LibnxError_BadInput);
     sa_trace("thread-spawn-start",0);
     Result rc = threadCreate(&threads[slot], fn, arg, NULL, 0x18000, slot==6 ? 48 : 44, -2);
@@ -910,4 +913,25 @@ u32 sa_dump_ticket(u32 storage,const NcmContentInfo *infos,u32 count,u8 *rights,
         *name=0;name=strrchr(issuer,'-');
     }
     fsFsClose(&fs); return rc;
+}
+
+/* Heartbeat owns its descriptors exclusively: no SD, logging or ownership mutex. */
+int sa_heartbeat_listen(void) {
+    int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0)return -errno;
+    int one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
+    struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(6001),.sin_addr={INADDR_ANY}};
+    if(bind(fd,(void*)&a,sizeof(a))<0 || listen(fd,8)<0 || fcntl(fd,F_SETFL,O_NONBLOCK)<0) {
+        int e=errno; close(fd); return -e;
+    }
+    return fd;
+}
+int sa_heartbeat_accept(int fd) {
+    int c=accept(fd,NULL,NULL);
+    if(c>=0 && fcntl(c,F_SETFL,O_NONBLOCK)<0) { close(c); return -1; }
+    return c;
+}
+int sa_heartbeat_health(int fd) {
+    int accepting=0,error=0; socklen_t n=sizeof(int);
+    if(getsockopt(fd,SOL_SOCKET,SO_ACCEPTCONN,&accepting,&n)<0 || !accepting)return 0;
+    n=sizeof(int); return getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&n)==0 && !error;
 }
