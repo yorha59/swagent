@@ -939,19 +939,27 @@ int sa_heartbeat_health(int fd) {
 /* Administrative reboot audit bypasses the best-effort queue, including in NRO.
  * Append mode keeps the writer's existing descriptor valid. */
 Result sa_reboot_log(void) {
-    FsFileSystem *fs=fsdevGetDeviceFileSystem("sdmc");
-    if(!fs) return MAKERESULT(Module_Libnx,LibnxError_NotFound);
-    fsFsCreateDirectory(fs,"/switch");
-    fsFsCreateFile(fs,"/switch/swagent.log",0,0);
+    /* Same path translation and open mode as put (sa_open).
+     * Diagnostic results: F001=translate/fs, F002=create, F003=open,
+     * F004=get size, F005=write. Never delete the existing audit log. */
+    FsFileSystem *fs; char p[FS_MAX_PATH];
+    if(fsdevTranslatePath("sdmc:/switch/swagent.log",&fs,p) || !fs) return 0xF001;
+    FsDirEntryType type;
+    Result rc=fsFsGetEntryType(fs,p,&type);
+    if(rc) {
+        rc=fsFsCreateFile(fs,p,0,0);
+        if(rc) return 0xF002;
+    }
     FsFile f;
-    Result rc=fsFsOpenFile(fs,"/switch/swagent.log",FsOpenMode_Write|FsOpenMode_Append,&f);
-    if(rc) return rc;
+    rc=fsFsOpenFile(fs,p,FsOpenMode_Write|FsOpenMode_Append,&f);
+    if(rc) return 0xF003;
     s64 offset=0;
     rc=fsFileGetSize(&f,&offset);
+    if(rc) { fsFileClose(&f); return 0xF004; }
     const char line[]="reboot: requested\n";
-    if(!rc) rc=fsFileWrite(&f,offset,line,sizeof(line)-1,FsWriteOption_Flush);
+    rc=fsFileWrite(&f,offset,line,sizeof(line)-1,FsWriteOption_Flush);
     fsFileClose(&f);
-    return rc;
+    return rc ? 0xF005 : 0;
 }
 Result sa_reboot(void) {
     Result rc=bpcInitialize();
