@@ -30,11 +30,11 @@ static int no_sd, missing, create_rc, creates, open_rc, size_rc, write_rc, close
 #define FsWriteOption_Flush 1
 #define FS_MAX_PATH 769
 typedef int FsDirEntryType;
-static int fsdevTranslatePath(const char *p,FsFileSystem **fs,char *out){assert(!strcmp(p,"sdmc:/switch/swagent.log"));*fs=&sd;strcpy(out,"/switch/swagent.log");return no_sd;}
-static Result fsFsGetEntryType(FsFileSystem *fs,const char *p,FsDirEntryType *type){assert(fs==&sd && !strcmp(p,"/switch/swagent.log"));*type=1;return missing;}
-static Result fsFsCreateFile(FsFileSystem *fs,const char *p,s64 size,int flags){assert(fs==&sd && !strcmp(p,"/switch/swagent.log") && size==0 && flags==0);creates++;return create_rc;}
+static int fsdevTranslatePath(const char *p,FsFileSystem **fs,char *out){assert(!strcmp(p,"sdmc:/switch/swagent.reboot.log"));*fs=&sd;strcpy(out,"/switch/swagent.reboot.log");return no_sd;}
+static Result fsFsGetEntryType(FsFileSystem *fs,const char *p,FsDirEntryType *type){assert(fs==&sd && !strcmp(p,"/switch/swagent.reboot.log"));*type=1;return missing;}
+static Result fsFsCreateFile(FsFileSystem *fs,const char *p,s64 size,int flags){assert(fs==&sd && !strcmp(p,"/switch/swagent.reboot.log") && size==0 && flags==0);creates++;return create_rc;}
 /* Append explicitly at the size returned below; Switch FS requires Write-only. */
-static Result fsFsOpenFile(FsFileSystem *fs,const char *p,int mode,FsFile *f){(void)f;assert(fs==&sd && !strcmp(p,"/switch/swagent.log") && mode==FsOpenMode_Write);return open_rc;}
+static Result fsFsOpenFile(FsFileSystem *fs,const char *p,int mode,FsFile *f){(void)f;assert(fs==&sd && !strcmp(p,"/switch/swagent.reboot.log") && mode==FsOpenMode_Write);return open_rc;}
 static Result fsFileGetSize(FsFile *f,s64 *size){(void)f;*size=123;return size_rc;}
 static Result fsFileWrite(FsFile *f,s64 offset,const void *p,size_t n,int flags){(void)f;assert(offset==123 && n==18 && !memcmp(p,"reboot: requested\n",n) && flags==FsWriteOption_Flush);assert(stage==0);stage=1;return write_rc;}
 static void fsFileClose(FsFile *f){(void)f;closes++;}
