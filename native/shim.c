@@ -937,29 +937,20 @@ int sa_heartbeat_health(int fd) {
 }
 
 /* Administrative reboot audit bypasses the best-effort queue, including in NRO.
- * Append mode keeps the writer's existing descriptor valid. */
+ * Use a separate file: logger keeps swagent.log open in ab+ mode, so opening
+ * the main log again conflicts with its resident handle (r4 confirmed this). */
 Result sa_reboot_log(void) {
-    /* Same path translation and open mode as put (sa_open).
-     * Diagnostic results: F001=translate/fs, F002=create, F003=open,
-     * F004=get size, F005=write. Never delete the existing audit log. */
-    FsFileSystem *fs; char p[FS_MAX_PATH];
-    if(fsdevTranslatePath("sdmc:/switch/swagent.reboot.log",&fs,p) || !fs) return 0xF001;
-    FsDirEntryType type;
-    Result rc=fsFsGetEntryType(fs,p,&type);
-    if(rc) {
-        rc=fsFsCreateFile(fs,p,0,0);
-        if(rc) return 0xF002;
-    }
-    FsFile f;
-    rc=fsFsOpenFile(fs,p,FsOpenMode_Write,&f);
-    if(rc) return 0xF003;
-    s64 offset=0;
-    rc=fsFileGetSize(&f,&offset);
-    if(rc) { fsFileClose(&f); return 0xF004; }
+    errno=0;
+    FILE *f=fopen("sdmc:/switch/swagent.reboot.log","ab");
+    if(!f) return errno ? errno : 1;
     const char line[]="reboot: requested\n";
-    rc=fsFileWrite(&f,offset,line,sizeof(line)-1,FsWriteOption_Flush);
-    fsFileClose(&f);
-    return rc ? rc : 0; /* raw rc unmasked for diagnosis */
+    errno=0;
+    Result rc=fwrite(line,1,sizeof(line)-1,f)==sizeof(line)-1 ? 0 : (errno ? errno : 1);
+    errno=0;
+    if(fflush(f)!=0 && !rc) rc=errno ? errno : 1;
+    errno=0;
+    if(fclose(f)!=0 && !rc) rc=errno ? errno : 1;
+    return rc;
 }
 Result sa_reboot(void) {
     Result rc=bpcInitialize();
