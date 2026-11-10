@@ -951,7 +951,7 @@ Result sa_reboot_log(void) {
         if(rc) return 0xF002;
     }
     FsFile f;
-    rc=fsFsOpenFile(fs,p,FsOpenMode_Write|FsOpenMode_Append,&f);
+    rc=fsFsOpenFile(fs,p,FsOpenMode_Write,&f);
     if(rc) return 0xF003;
     s64 offset=0;
     rc=fsFileGetSize(&f,&offset);
