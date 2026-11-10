@@ -87,14 +87,13 @@ impl Drop for File {
         }
     }
 }
-pub fn remove(path: &str) {
+pub fn remove(path: &str) -> Result {
     let mut p = Text::<768>::new();
-    if p.push(path.as_bytes()).is_ok() {
-        unsafe {
-            let _operation = crate::budget::Operation::new();
-            ffi::sa_remove(p.c());
-        }
-    }
+    p.push(path.as_bytes())?;
+    rc(unsafe {
+        let _operation = crate::budget::Operation::new();
+        ffi::sa_remove(p.c())
+    }, "remove file")
 }
 pub fn rename(from: &str, to: &str) -> Result {
     let mut a = Text::<768>::new();

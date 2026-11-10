@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.31-rs sys\r\n"),
+        ("version", "swagent-1.32-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1742,7 +1742,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.31-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.32-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1757,7 +1757,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.31-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.32-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -2265,4 +2265,49 @@ fn dump_error_clears_pending_queue_and_worker_accepts_next_job() {
     protocol::test_receive("ps");protocol::test_run_one();
     loop {let mut s=String::new();reader.read_line(&mut s).unwrap();assert!(s.starts_with("ps: "));if s=="ps: end\r\n" {break;}}
     protocol::test_session(-1);
+}
+
+#[test]
+fn idle_client_is_kicked_and_watchdog_recreates_listener() {
+    use std::{io::Read, os::unix::{io::IntoRawFd, net::UnixStream}, time::Duration};
+    unsafe extern "C" {
+        fn host_listener_fixture(enabled:i32, client:i32, error:i32);
+        fn host_listener_health_failure(bad:i32);
+    }
+    let _guard=SERIAL.lock().unwrap();
+    setup();
+    let mut listener=-1;
+    for partial in [b"".as_slice(),b"pi".as_slice()] {
+        let (server,mut client)=UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        unsafe { host_listener_fixture(1,server.into_raw_fd(),11); }
+        protocol::test_serve_step(&mut listener);
+        let lane=std::thread::spawn(|| protocol::test_client_timeout(0,40));
+        client.write_all(partial).unwrap();
+        let mut b=[0];
+        assert_eq!(client.read(&mut b).unwrap(),0);
+        lane.join().unwrap();
+    }
+    // Healthy probes preserve ownership; failed probes force a fresh listener.
+    protocol::listener_check(crate::util::now_ms());
+    unsafe { host_listener_health_failure(1); }
+    protocol::listener_check(crate::util::now_ms());
+    unsafe { host_listener_health_failure(0); }
+    protocol::test_serve_step(&mut listener);
+    assert!(listener>=0);
+    // Mock time exercises the stalled accept heartbeat independently of health.
+    protocol::listener_check(crate::util::now_ms()+60_001);
+    protocol::test_serve_step(&mut listener);
+    assert!(listener>=0);
+    unsafe { ffi::close(listener); host_listener_fixture(0,-1,0); }
+}
+
+#[test]
+fn io_remove_propagates_missing_file_error() {
+    let _guard=SERIAL.lock().unwrap();
+    setup();
+    let err=crate::io::remove("sdmc:/switch/nonexistent-remove-132").unwrap_err();
+    assert_eq!(err.0,"remove file");
+    assert_ne!(err.1,0);
+    assert!(crate::io::remove(&"x".repeat(800)).is_err());
 }

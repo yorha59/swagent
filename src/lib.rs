@@ -86,6 +86,11 @@ fn start_listener() {
         log::add("watchdog creation failed; retrying");
         util::sleep(250);
     }
+    loop {
+        if unsafe { ffi::sa_spawn(6, protocol::listener_watchdog, core::ptr::null_mut()) } == 0 { break; }
+        log::add("listener watchdog creation failed; retrying");
+        util::sleep(1000);
+    }
     protocol::serve()
 }
 #[cfg(test)]

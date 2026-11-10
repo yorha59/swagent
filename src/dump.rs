@@ -167,7 +167,7 @@ pub fn run(
         impl Drop for Partial<'_> {
             fn drop(&mut self) {
                 if !self.1 {
-                    crate::io::remove(self.0);
+                    let _ = crate::io::remove(self.0);
                 }
             }
         }

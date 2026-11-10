@@ -1,4 +1,4 @@
-VERSION := 1.31
+VERSION := 1.32
 DEVKITPRO ?= $(HOME)/devkitpro
 export DEVKITPRO
 CARGO := $(HOME)/.cargo/bin/cargo
@@ -50,6 +50,7 @@ check: all nro
 	python3 tests/test_nro_entry.py
 	python3 tests/test_shutdown.py
 	python3 tests/test_connect.py
+	python3 tests/test_recovery.py
 clean:
 	rm -rf build dist
 	$(CARGO) clean

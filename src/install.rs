@@ -140,8 +140,8 @@ pub fn entry(header: &[u8], count: usize, base: u64, i: usize) -> Result<Entry<'
 struct Cleanup;
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        if crate::budget::check().is_ok() { io::remove(NSP); }
-        io::remove(CNCA)
+        if crate::budget::check().is_ok() { let _ = io::remove(NSP); }
+        let _ = io::remove(CNCA);
     }
 }
 struct Stage(Service);
@@ -502,7 +502,7 @@ fn install_inner(
     if let Some(expected) = expected {
         let got = crate::md5::file(NSP, &mut chunk, u64::MAX)?;
         if got.str() != expected {
-            io::remove(NSP);
+            let _ = io::remove(NSP);
             let mut line = Text::<160>::new();
             use core::fmt::Write;
             let _ = write!(
