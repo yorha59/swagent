@@ -959,7 +959,7 @@ Result sa_reboot_log(void) {
     const char line[]="reboot: requested\n";
     rc=fsFileWrite(&f,offset,line,sizeof(line)-1,FsWriteOption_Flush);
     fsFileClose(&f);
-    return rc ? 0xF005 : 0;
+    return rc ? rc : 0; /* raw rc unmasked for diagnosis */
 }
 Result sa_reboot(void) {
     Result rc=bpcInitialize();

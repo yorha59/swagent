@@ -41,7 +41,7 @@ static void fsFileClose(FsFile *f){(void)f;closes++;}
 ''' + function('Result sa_reboot(void)') + '\n' + function('Result sa_reboot_log(void)') + r'''
 int main(void){
     assert(sa_reboot_log()==0 && stage==1 && closes==1);
-    stage=0;write_rc=73;assert(sa_reboot_log()==0xF005 && closes==2);
+    stage=0;write_rc=73;assert(sa_reboot_log()==73 && closes==2);
     stage=0;write_rc=0;size_rc=74;assert(sa_reboot_log()==0xF004 && stage==0 && closes==3);
     size_rc=0;open_rc=75;assert(sa_reboot_log()==0xF003 && stage==0 && closes==3);
     open_rc=0;no_sd=1;assert(sa_reboot_log()==0xF001 && closes==3);
