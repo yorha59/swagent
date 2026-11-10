@@ -943,7 +943,7 @@ Result sa_reboot_log(void) {
      * Diagnostic results: F001=translate/fs, F002=create, F003=open,
      * F004=get size, F005=write. Never delete the existing audit log. */
     FsFileSystem *fs; char p[FS_MAX_PATH];
-    if(fsdevTranslatePath("sdmc:/switch/swagent.log",&fs,p) || !fs) return 0xF001;
+    if(fsdevTranslatePath("sdmc:/switch/swagent.reboot.log",&fs,p) || !fs) return 0xF001;
     FsDirEntryType type;
     Result rc=fsFsGetEntryType(fs,p,&type);
     if(rc) {

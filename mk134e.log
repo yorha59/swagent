@@ -1,0 +1,186 @@
+/Users/sichengzu/.cargo/bin/cargo build --release
+warning: function `sa_quit` is never used
+  --> src/ffi.rs:54:12
+   |
+54 |     pub fn sa_quit();
+   |            ^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `sa_net_reinit` is never used
+  --> src/ffi.rs:77:12
+   |
+77 |     pub fn sa_net_reinit() -> u32;
+   |            ^^^^^^^^^^^^^
+
+warning: function `sa_nonblocking` is never used
+  --> src/ffi.rs:79:12
+   |
+79 |     pub fn sa_nonblocking(fd: i32) -> i32;
+   |            ^^^^^^^^^^^^^^
+
+warning: method `exclusive` is never used
+  --> src/net.rs:36:8
+   |
+20 | impl Gate {
+   | --------- method in this implementation
+...
+36 |     fn exclusive<R>(&self, f: impl FnOnce() -> R) -> R {
+   |        ^^^^^^^^^
+
+warning: function `failed` is never used
+  --> src/net.rs:64:8
+   |
+64 | pub fn failed(rc: i32) {
+   |        ^^^^^^
+
+warning: function `reinit` is never used
+  --> src/net.rs:75:8
+   |
+75 | pub fn reinit() -> u32 {
+   |        ^^^^^^
+
+warning: function `recover` is never used
+  --> src/net.rs:91:8
+   |
+91 | pub fn recover() {
+   |        ^^^^^^^
+
+warning: `swagent` (lib) generated 7 warnings
+    Finished `release` profile [optimized] target(s) in 0.00s
+mkdir -p build
+/Users/sichengzu/devkitpro/devkitA64/bin/aarch64-none-elf-gcc -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE -O2 -g -Wall -Wextra -ffunction-sections -fdata-sections -D__SWITCH__ -I/Users/sichengzu/devkitpro/libnx/include -c native/shim.c -o build/shim.o
+/Users/sichengzu/devkitpro/devkitA64/bin/aarch64-none-elf-gcc -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE -specs=/Users/sichengzu/devkitpro/libnx/switch.specs -Wl,-Map,build/swagent.map,--wrap=exit,--wrap=_exit,--wrap=abort build/shim.o target/aarch64-unknown-none/release/libswagent.a -L/Users/sichengzu/devkitpro/libnx/lib -lnx -lm -o build/swagent.elf
+mkdir -p build/exefs
+/Users/sichengzu/devkitpro/tools/bin/elf2nso build/swagent.elf build/exefs/main
+mkdir -p dist/atmosphere/contents/430000000000000B/flags
+/Users/sichengzu/devkitpro/tools/bin/build_pfs0 build/exefs dist/atmosphere/contents/430000000000000B/exefs.nsp
+touch dist/atmosphere/contents/430000000000000B/flags/boot2.flag
+cp dist/atmosphere/contents/430000000000000B/exefs.nsp build/swagent.nsp
+mkdir -p build
+/Users/sichengzu/devkitpro/devkitA64/bin/aarch64-none-elf-gcc -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE -O2 -g -Wall -Wextra -ffunction-sections -fdata-sections -D__SWITCH__ -I/Users/sichengzu/devkitpro/libnx/include -DSA_NRO -c native/shim.c -o build/shim-nro.o
+/Users/sichengzu/devkitpro/devkitA64/bin/aarch64-none-elf-gcc -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE -specs=/Users/sichengzu/devkitpro/libnx/switch.specs -Wl,-Map,build/swagent-nro.map build/shim-nro.o target/aarch64-unknown-none/release/libswagent.a -L/Users/sichengzu/devkitpro/libnx/lib -lnx -lm -o build/swagent-nro.elf
+/Users/sichengzu/devkitpro/tools/bin/nacptool --create "SWAgent" "Simon" "1.34" build/control.nacp
+mkdir -p dist/switch
+/Users/sichengzu/devkitpro/tools/bin/elf2nro build/swagent-nro.elf dist/switch/swagent.nro --nacp=build/control.nacp --icon=/Users/sichengzu/devkitpro/libnx/default_icon.jpg
+mkdir -p build
+cc -Wall -Wextra -c tests/host.c -o build/host.o
+RUSTFLAGS="-C link-arg=/private/tmp/swagent/build/host.o -A dead_code" /Users/sichengzu/.cargo/bin/cargo test --target aarch64-apple-darwin
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (target/aarch64-apple-darwin/debug/deps/swagent-68b2da3daafb9d54)
+
+running 70 tests
+test files::tests::whitelist ... ok
+test protocol::upload_tests::rejects_oversized_put_before_open_or_allocation ... ok
+test tests::bounded_queue_fifo ... ok
+test tests::boot_log_format_and_installed_confirmation ... ok
+test protocol::upload_tests::partial_upload_is_deleted ... ok
+test files::tests::real_fs_commands ... ok
+test files::tests::backwards_tail_boundaries_and_large_files ... ok
+test tests::accept_responds_during_upload_and_recovers_after_listener_failure ... ok
+test tests::accepted_commands_wake_persistent_worker_within_one_second ... ok
+test tests::bsd_reset_waits_for_calls_and_rejects_stale_descriptors ... ok
+test tests::framing_fragmentation_overflow_recovery ... ok
+test tests::download_hash_gate_and_restart_truncation ... ok
+test tests::download_progress_renews_budget_and_stall_expires ... ok
+test tests::dump_error_clears_pending_queue_and_worker_accepts_next_job ... ok
+test tests::dump_mock_fixture_pipeline_preserves_nca_ticket_and_cert ... ok
+test tests::dump_mock_pipeline_paths_and_cleanup ... ok
+test tests::dump_progress_renews_budget_and_stall_expires ... ok
+test tests::dump_real_fixtures_byte_exact_roundtrip ... ok
+test tests::dump_socketpair_command_progress_status ... ok
+test tests::failed_install_keeps_partial_and_second_install_resumes ... ok
+test tests::full_install_hash_binary_http_transport ... ok
+test tests::hash_query_streams_and_enforces_read_rules ... ok
+test tests::hung_install_operation_times_out_without_reusing_its_lane ... ok
+test tests::idle_client_is_kicked_and_watchdog_recreates_listener ... ok
+test tests::install_hash_includes_resumed_prefix ... ok
+test tests::install_hash_mock_http_server ... ok
+test tests::known_good_gta_update_pfs0_from_disk ... ok
+test tests::install_http_range_resume_restart_and_complete ... ok
+test tests::malformed_cnmt_never_panics ... ok
+test tests::malformed_pfs0_bounds ... ok
+test tests::max17050_decode_fixtures ... ok
+test tests::install_network_exhaustion_preserves_download ... ok
+test tests::install_range_fixtures_across_commands ... ok
+test tests::install_writes_renew_budget_past_ten_grace_windows_and_stall_expires ... ok
+test tests::installer_continues_without_importing_invalid_or_failed_tickets ... ok
+test tests::installer_from_disk_stages_and_cleans_success_and_failure ... ok
+test tests::installer_streams_single_chunk_and_cleans_failure ... ok
+test tests::invalid_download_is_removed_before_resume ... ok
+test tests::io_remove_propagates_missing_file_error ... ok
+test tests::md5_known_vectors_and_fragmentation ... ok
+test tests::launch_and_quit_commands ... ok
+test tests::nro_bind_failure_waits_five_seconds_then_takes_over ... ok
+test tests::nro_version_and_bare_quit ... ok
+test tests::ping_version_status_and_busy_while_install_worker_is_blocked ... ok
+test tests::power_queued_command_and_fallback ... ok
+test tests::process_commands_queue_self_guard_and_errors ... ok
+test tests::put_one_megabyte_wire_roundtrip ... ok
+test tests::put_size_limit_wire_reply ... ok
+test tests::reboot_receipt_and_eof_precede_delayed_bpc ... ok
+test tests::reboot_rejects_arguments_and_failed_audit_without_bpc ... ok
+test tests::receive_transient_storm_mid_body_succeeds ... ok
+test tests::refused_install_reports_errno_without_retry_or_listener_reset ... ok
+test tests::status_formatting ... ok
+test tests::remote_connect_failure_does_not_reset_listener_and_init_failure_retries ... ok
+test tests::removed_commands_are_unknown ... ok
+test tests::reset_at_half_reconnects_with_range ... ok
+test tests::ring_wrap_and_concurrent_reads ... ok
+test tests::url_validation ... ok
+test tests::rm_exact_file_and_guards ... ok
+test tests::wifi_length_prefix_boundaries ... ok
+test tests::wifi_switchbrew_wire_fixture ... ok
+test tests::sleep_guard_save_restore_and_crash_recovery ... ok
+test tests::sleep_network_logic_and_checked_bounds ... ok
+test tests::stage_span_skips_dead_logger_and_watchdog_reports_stalled_stage ... ok
+test tests::stage_spans_throttle_progress_and_record_bytes ... ok
+test tests::streaming_http_and_truncation ... ok
+test tests::system_settings_commands_and_readback ... ok
+test tests::transient_receive_stall_keeps_install_prefix ... ok
+test tests::update_validates_image_and_restores_failed_launch ... ok
+test tests::wifi_ipc_error_keeps_worker_responsive ... ok
+
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.25s
+
+python3 tests/check_artifact.py
+NSP: PFS0 + NSO + NPDM title ID + AArch64 ELF verified; 205,544 bytes
+SHA256: 07e74c0b8e6222d59f10c50c705b075d43ffad1dd1adfa20c2a78cd36426b8db
+NRO: NRO0 + page segments + MOD0/BSS verified; 477,381 bytes
+NRO entry: libnx crt0/heap/app init + console-before-worker + isolated network init verified
+python3 tests/test_nro_packer.py
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+OK
+python3 tests/test_nro_entry.py
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.060s
+
+OK
+python3 tests/test_shutdown.py
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.000s
+
+OK
+python3 tests/test_connect.py
+.
+----------------------------------------------------------------------
+Ran 1 test in 1.075s
+
+OK
+python3 tests/test_recovery.py
+...
+----------------------------------------------------------------------
+Ran 3 tests in 1.760s
+
+OK
+python3 tests/test_reboot.py
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.898s
+
+OK
