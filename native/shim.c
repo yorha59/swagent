@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.33-rs"; }
+const char *sa_version(void) { return "swagent-1.34-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -934,4 +934,24 @@ int sa_heartbeat_health(int fd) {
     int accepting=0,error=0; socklen_t n=sizeof(int);
     if(getsockopt(fd,SOL_SOCKET,SO_ACCEPTCONN,&accepting,&n)<0 || !accepting)return 0;
     n=sizeof(int); return getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&n)==0 && !error;
+}
+
+/* Administrative reboot audit bypasses the best-effort queue, including in NRO.
+ * Append mode keeps the writer's existing descriptor valid. */
+Result sa_reboot_log(void) {
+    mkdir("sdmc:/switch",0777);
+    FILE *f=fopen("sdmc:/switch/swagent.log","ab");
+    if(!f) return errno ? (Result)errno : 1;
+    const char line[]="reboot: requested\n";
+    bool ok=fwrite(line,1,sizeof(line)-1,f)==sizeof(line)-1;
+    if(fflush(f)!=0) ok=false;
+    if(fclose(f)!=0) ok=false;
+    return ok ? 0 : 1;
+}
+Result sa_reboot(void) {
+    Result rc=bpcInitialize();
+    if(R_FAILED(rc)) return rc;
+    rc=bpcRebootSystem();
+    bpcExit();
+    return rc;
 }

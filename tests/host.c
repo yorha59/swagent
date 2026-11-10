@@ -200,7 +200,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.33-rs"; }
+const char *sa_version(void) { return "swagent-1.34-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
@@ -249,3 +249,10 @@ int sa_log_alive(void){return !log_disabled;}
 int sa_heartbeat_listen(void){return sa_listen();}
 int sa_heartbeat_accept(int fd){if(heartbeat_test_run && mock_accept<0){heartbeat_test_run=2;errno=EAGAIN;return -1;}return sa_accept(fd);}
 int sa_heartbeat_health(int fd){(void)fd;return 1;}
+
+static atomic_int reboot_calls, reboot_logged, reboot_log_rc;
+void host_reboot_reset(void){atomic_store(&reboot_calls,0);atomic_store(&reboot_logged,0);atomic_store(&reboot_log_rc,0);}
+void host_reboot_log_failure(int rc){atomic_store(&reboot_log_rc,rc);}
+int host_reboot_stat(int n){return atomic_load(n ? &reboot_logged : &reboot_calls);}
+uint32_t sa_reboot_log(void){atomic_store(&reboot_logged,1);return atomic_load(&reboot_log_rc);}
+uint32_t sa_reboot(void){atomic_fetch_add(&reboot_calls,1);return 91;}
