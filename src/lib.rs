@@ -8,6 +8,7 @@ mod http;
 mod install;
 mod io;
 mod log;
+mod heartbeat;
 mod md5;
 mod net;
 mod power;
@@ -51,6 +52,12 @@ pub extern "C" fn agent_nro_main() {
 fn start_listener() {
     log::add(version());
     unsafe { ffi::sa_jobs_init(); }
+    loop {
+        if stopping() { return; }
+        if unsafe { ffi::sa_spawn(7, heartbeat::serve, core::ptr::null_mut()) } == 0 { break; }
+        util::sleep(250);
+    }
+
     loop {
         if stopping() { return; }
         let code = unsafe { ffi::sa_spawn(0, protocol::worker, core::ptr::null_mut()) };

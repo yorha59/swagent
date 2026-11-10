@@ -595,7 +595,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.32-rs sys\r\n"),
+        ("version", "swagent-1.33-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1660,6 +1660,24 @@ fn hung_install_operation_times_out_without_reusing_its_lane() {
         assert!(start.elapsed() < Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(1));
     }
+    // The dedicated heartbeat accept/reply path runs while the real worker is stuck.
+    {
+        use std::os::unix::io::IntoRawFd;
+        let (hb_server, mut hb_client)=UnixStream::pair().unwrap();
+        hb_client.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let heartbeat=std::thread::spawn(move || {
+            unsafe extern "C" { fn host_listener_fixture(enabled:i32,client:i32,error:i32); fn host_heartbeat_run(); }
+            unsafe { host_listener_fixture(1,hb_server.into_raw_fd(),0); host_heartbeat_run(); }
+            heartbeat::serve(core::ptr::null_mut());
+            unsafe { host_listener_fixture(0,-1,0); }
+        });
+        hb_client.write_all(b"x").unwrap();
+        let mut pong=[0u8;5]; hb_client.read_exact(&mut pong).unwrap();
+        assert_eq!(&pong,b"pong\n");
+        let mut eof=[0]; assert_eq!(hb_client.read(&mut eof).unwrap(),0);
+        heartbeat.join().unwrap();
+        assert!(!worker.is_finished());
+    }
     // Simulate a native call that ignores socket timeouts. The listener's
     // watchdog must reply even though the command thread cannot return yet.
     unsafe { host_clock_offset(30_001); }
@@ -1742,7 +1760,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.32-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.33-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1757,7 +1775,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.32-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.33-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -2310,4 +2328,49 @@ fn io_remove_propagates_missing_file_error() {
     assert_eq!(err.0,"remove file");
     assert_ne!(err.1,0);
     assert!(crate::io::remove(&"x".repeat(800)).is_err());
+}
+
+#[test]
+fn stage_spans_throttle_progress_and_record_bytes() {
+    let _guard=SERIAL.lock().unwrap();
+    unsafe extern "C" { fn host_clock_offset(ms:u64); }
+    unsafe { host_clock_offset(0); }
+    let mut span=log::Span::new("dump",0x0100123456789000,"fixture-read");
+    for _ in 0..100 { span.progress(381,1000); }
+    unsafe { host_clock_offset(30001); }
+    span.progress(381,1000);
+    for _ in 0..100 { span.progress(400,1000); }
+    drop(span);
+    unsafe { host_clock_offset(0); }
+    let mut lines=Vec::new();
+    log::dump(1000,|line| {
+        let s=String::from_utf8_lossy(line).into_owned();
+        if s.contains("phase=fixture-read") {lines.push(s);}
+    });
+    assert_eq!(lines.len(),2);
+    assert_eq!(lines[0],"span op=dump title=0100123456789000 phase=fixture-read progress=38.1%");
+    assert!(lines[1].contains(" t=300"));
+    assert!(lines[1].ends_with(" bytes=400"));
+}
+
+#[test]
+fn stage_span_skips_dead_logger_and_watchdog_reports_stalled_stage() {
+    let _guard=SERIAL.lock().unwrap();
+    unsafe extern "C" {fn host_log_disabled(disabled:i32); fn host_clock_offset(ms:u64);}
+    unsafe {host_log_disabled(1);}
+    let mut disabled=log::Span::new("dump",0x133,"disabled-stage");
+    disabled.progress(1,2);drop(disabled);
+    unsafe {host_log_disabled(0); host_clock_offset(0);}
+    let span=log::Span::new("dump",0x133,"content-read");
+    unsafe {host_clock_offset(30001);}
+    log::span_tick();log::span_tick();
+    drop(span);
+    unsafe {host_clock_offset(0);}
+    let mut progress=0;
+    log::dump(1000,|line| {
+        let line=String::from_utf8_lossy(line);
+        assert!(!line.contains("disabled-stage"));
+        if line.contains("title=0000000000000133") && line.contains("progress=") {progress+=1;}
+    });
+    assert_eq!(progress,1);
 }

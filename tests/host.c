@@ -200,7 +200,7 @@ uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.32-rs"; }
+const char *sa_version(void) { return "swagent-1.33-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
@@ -219,7 +219,9 @@ void sa_jobs_init(void) { pthread_mutex_lock(&jobs_mutex); jobs_count=0; pthread
 void sa_jobs_signal(void) { pthread_mutex_lock(&jobs_mutex); jobs_count++; pthread_cond_signal(&jobs_cond); pthread_mutex_unlock(&jobs_mutex); }
 void sa_jobs_wait(void) { pthread_mutex_lock(&jobs_mutex); while(!jobs_count) pthread_cond_wait(&jobs_cond,&jobs_mutex); jobs_count--; pthread_mutex_unlock(&jobs_mutex); }
 
-int sa_stopping(void) { return 0; }
+static _Thread_local int heartbeat_test_run;
+void host_heartbeat_run(void){heartbeat_test_run=1;}
+int sa_stopping(void) { return heartbeat_test_run==2; }
 void sa_listener_close(int fd) { close(fd); }
 
 uint32_t sa_dump_meta(uint64_t title,uint32_t *storage,void *infos,uint32_t capacity,uint32_t *count) {
@@ -240,3 +242,10 @@ int sa_listener_health(int fd,int stale) {
     if(health_failure || stale) { close(fd); return 1; }
     return 0;
 }
+
+static _Thread_local int log_disabled;
+void host_log_disabled(int disabled){log_disabled=disabled;}
+int sa_log_alive(void){return !log_disabled;}
+int sa_heartbeat_listen(void){return sa_listen();}
+int sa_heartbeat_accept(int fd){if(heartbeat_test_run && mock_accept<0){heartbeat_test_run=2;errno=EAGAIN;return -1;}return sa_accept(fd);}
+int sa_heartbeat_health(int fd){(void)fd;return 1;}

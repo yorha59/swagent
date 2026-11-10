@@ -23,6 +23,8 @@ class RecoveryTest(unittest.TestCase):
 #include <string.h>
 #include <sys/stat.h>
 static atomic_flag log_lock=ATOMIC_FLAG_INIT;
+static atomic_ullong log_beat;
+static unsigned long long sa_now_ms(void){return 1;}
 static char log_queue[128][768],log_tail[16384];
 static size_t log_head,log_count,log_tail_len;
 static int opens,closes,writes,flushes,fail_until,rotates;

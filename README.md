@@ -229,7 +229,7 @@ unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. After binding, the console
-prints `swagent-1.32-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
+prints `swagent-1.33-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
 The listener binds all interfaces. If the sysmodule owns port 6000, the NRO
 shows a busy message and retries every five seconds, taking over automatically
 when the port becomes available. PLUS displays the HOME instruction while waiting.
@@ -242,7 +242,7 @@ handlers and the reusable 4 MiB install chunk. The resident edition uses its
 applet/HID/FS startup. It initializes the console before starting network workers,
 skips resident sleep-setting recovery, firmware probing and the SD log writer,
 and prints the endpoint only from the console thread.
-`version` reports `swagent-1.32-rs nro` or `swagent-1.32-rs sys`.
+`version` reports `swagent-1.33-rs nro` or `swagent-1.33-rs sys`.
 The `update` command retains its resident sysmodule update behavior.
 
 `make nro` uses official devkitPro `elf2nro` and libnx crt0/relocation handling.
@@ -329,7 +329,7 @@ console after each status print and every 100ms while polling PLUS. Bind
 failures retry every five seconds; a busy port shows the sysmodule warning,
 and successful takeover displays the LAN IP and port.
 
-Version 1.32 (`swagent-1.32-rs`) leaves NRO teardown to the system. Press HOME
+Version 1.32 (`swagent-1.33-rs`) leaves NRO teardown to the system. Press HOME
 to exit. PLUS only prints `press HOME to exit` and refreshes the console; main
 never returns, including when the applet loop reports exit or startup fails.
 Workers keep running until system teardown. Bare `quit` disconnects the client.
@@ -391,3 +391,19 @@ ring continues recording when SD writes fail. These mechanisms handle returned
 errors and stalled accept calls that shutdown can release; they cannot guarantee
 recovery from a permanently blocked BSD/FS service IPC. See PR_DESCRIPTION.md for
 the socket ownership audit and host regression coverage.
+
+
+### Stage timing and independent heartbeat (1.33)
+
+`6001/TCP` is a dedicated heartbeat thread: send any byte, receive `pong\n`,
+then EOF. It bypasses the command worker, SD, logging and connection registry
+locks. Silent clients are closed after two seconds. Bind retries use the same
+250 ms (NRO: 5 s) to 30 s exponential backoff as port 6000. The listener
+watchdog requests a socket health probe; the heartbeat thread owns all closes.
+
+Install and dump emit stage-level `span op=... title=... phase=... t=...ms bytes=...`
+lines through the existing log queue and 1 MiB rotation. Active stages emit
+`progress=38.1%` at most once per 30 seconds, including stalled IPC stages via
+the watchdog. Before install metadata identifies a title, `title=0000000000000000`;
+unknown stage totals report 0.0%. There is no per-block log emission. Span work
+is skipped when the log writer heartbeat is absent or stale (60 seconds).

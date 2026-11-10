@@ -103,6 +103,7 @@ pub fn header(items: &[Item], padding: usize) -> Result<Buffer> {
     }
     Ok(h)
 }
+#[cfg(test)]
 pub fn pack(
     backend: &mut dyn Backend,
     items: &[Item],
@@ -110,6 +111,10 @@ pub fn pack(
     out: &mut File,
     emit: &mut dyn FnMut(&str),
 ) -> Result<u64> {
+    pack_title(backend,items,padding,out,emit,0)
+}
+fn pack_title(backend: &mut dyn Backend, items: &[Item], padding: usize, out: &mut File, emit: &mut dyn FnMut(&str), title: u64) -> Result<u64> {
+    let packaging = crate::log::Span::new("dump", title, "pack");
     let h = header(items, padding)?;
     let total = items.iter().try_fold(h.len() as u64, |n, e| {
         n.checked_add(e.size).ok_or(Error("dump size overflow", 0))
@@ -119,6 +124,8 @@ pub fn pack(
     }
     crate::install::INSTALL_TOTAL_BYTES.store(total, Relaxed);
     out.write(0, &h)?;
+    drop(packaging);
+    let mut reading = crate::log::Span::new("dump", title, "content-read");
     let mut offset = h.len() as u64;
     let mut chunk = Buffer::new(CHUNK)?;
     for item in items {
@@ -130,11 +137,14 @@ pub fn pack(
             out.write(offset, &chunk[..n])?;
             pos += n as u64;
             offset += n as u64;
+            reading.progress(offset-h.len() as u64,total-h.len() as u64);
             crate::budget::progress()?;
             crate::install::INSTALL_RX_BYTES.store(offset, Relaxed);
             emit(crate::protocol::format_status(2, offset, total).str());
         }
     }
+    drop(reading);
+    let _finish = crate::log::Span::new("dump", title, "finalize");
     out.flush()?;
     Ok(total)
 }
@@ -150,7 +160,9 @@ pub fn run(
     crate::install::INSTALL_PHASE.store(1, Release);
     let result: Result = (|| {
         let mut catalog = Catalog::new()?;
+        let lookup = crate::log::Span::new("dump", title, "ncm-lookup");
         let notik = backend.catalog(title, &mut catalog)?;
+        drop(lookup);
         if notik {
             crate::log::add("dump: warning no ticket (notik)");
             emit("dump: warning notik");
@@ -174,7 +186,7 @@ pub fn run(
         let mut cleanup = Partial(p.str(), false);
         let mut out = File::open(p.str(), true)?;
         crate::install::INSTALL_PHASE.store(2, Release);
-        let total = pack(backend, catalog.entries(), 0, &mut out, emit)?;
+        let total = pack_title(backend, catalog.entries(), 0, &mut out, emit, title)?;
         drop(out);
         cleanup.1 = true;
         let mut line = Text::<1024>::new();
@@ -347,6 +359,7 @@ impl Backend for Native {
         drop(file);
         drop(mount);
         drop(stage);
+        let _ticket = crate::log::Span::new("dump", title, "ticket");
         let (mut tn, mut cn) = (0usize, 0usize);
         rc(
             unsafe {

@@ -294,6 +294,7 @@ static JOB_STATE: Lock<JobState> = Lock::new(JobState {
 });
 pub extern "C" fn watchdog(_: *mut core::ffi::c_void) {
     while !crate::stopping() {
+        crate::log::span_tick();
         check_budget();
         sleep(20);
     }
@@ -1062,6 +1063,7 @@ pub(crate) fn listener_check(now: u64) {
 pub extern "C" fn listener_watchdog(_: *mut core::ffi::c_void) {
     while !crate::stopping() {
         sleep(30_000);
+        crate::heartbeat::check();
         listener_check(now_ms());
     }
 }

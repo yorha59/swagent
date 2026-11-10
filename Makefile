@@ -1,4 +1,4 @@
-VERSION := 1.32
+VERSION := 1.33
 DEVKITPRO ?= $(HOME)/devkitpro
 export DEVKITPRO
 CARGO := $(HOME)/.cargo/bin/cargo
