@@ -138,9 +138,6 @@ static void log_writer(void *arg) {
         if(size>0) { fseek(old,size>16384?size-16384:0,SEEK_SET); size_t n=fread(bytes,1,sizeof(bytes),old); log_cache(bytes,n); }
         fclose(old);
     }
-    FILE *f=NULL;
-    unsigned failures=0;
-    bool reopened=false;
     for(;;) {
         atomic_store(&log_beat,sa_now_ms());
         char line[768]={0};
@@ -148,8 +145,10 @@ static void log_writer(void *arg) {
             if(log_count) { memcpy(line,log_queue[log_head],sizeof(line)); log_head=(log_head+1)%128; log_count--; }
             atomic_flag_clear(&log_lock);
         }
-        if(!line[0]) { if (sa_stopping()) { if(f) fclose(f); return; } svcSleepThread(10000000); continue; }
-        if(!f) f=fopen("sdmc:/switch/swagent.log","ab+");
+        if(!line[0]) { if (sa_stopping()) return; svcSleepThread(10000000); continue; }
+        /* Switch FS rejects other opens while this writer owns the file.
+         * Never retain a handle across queue iterations or idle sleeps. */
+        FILE *f=fopen("sdmc:/switch/swagent.log","ab");
         size_t n=strlen(line);
         bool ok=false;
         if(f) {
@@ -157,21 +156,14 @@ static void log_writer(void *arg) {
             long size=positioned ? ftell(f) : -1;
             if(size>=0 && (unsigned long)size+n>1024*1024) {
                 fclose(f); f=fopen("sdmc:/switch/swagent.log","wb");
-                if(!atomic_flag_test_and_set(&log_lock)) { log_tail_len=0; atomic_flag_clear(&log_lock); }
+                if(f && !atomic_flag_test_and_set(&log_lock)) { log_tail_len=0; atomic_flag_clear(&log_lock); }
             }
             if(f && size>=0) ok=fwrite(line,1,n,f)==n && fflush(f)==0;
         }
-        if(ok) { log_cache(line,n); failures=0; reopened=false; }
-        else if(++failures>=10 && !reopened) {
-            if(f) fclose(f);
-            f=fopen("sdmc:/switch/swagent.log","ab+");
-            reopened=true;
-            /* Retry this line once after reopening; later lines still reach
-             * the Rust ring even if SD remains unavailable. */
-            if(f && fwrite(line,1,n,f)==n && fflush(f)==0) {
-                log_cache(line,n); failures=0; reopened=false;
-            }
-        }
+        /* Close even after seek/write/flush failure. The next queued line
+         * opens afresh, so SD recovery needs no resident-handle retry state. */
+        if(f && fclose(f)!=0) ok=false;
+        if(ok) log_cache(line,n);
     }
 }
 static void sa_trace(const char *step,int rc) {
@@ -937,8 +929,8 @@ int sa_heartbeat_health(int fd) {
 }
 
 /* Administrative reboot audit bypasses the best-effort queue, including in NRO.
- * Use a separate file: logger keeps swagent.log open in ab+ mode, so opening
- * the main log again conflicts with its resident handle (r4 confirmed this). */
+ * Keep a separate file so audit writes never compete with a logger flush
+ * and remain independently readable immediately before reboot. */
 Result sa_reboot_log(void) {
     errno=0;
     FILE *f=fopen("sdmc:/switch/swagent.reboot.log","ab");
