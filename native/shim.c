@@ -939,14 +939,19 @@ int sa_heartbeat_health(int fd) {
 /* Administrative reboot audit bypasses the best-effort queue, including in NRO.
  * Append mode keeps the writer's existing descriptor valid. */
 Result sa_reboot_log(void) {
-    mkdir("sdmc:/switch",0777);
-    FILE *f=fopen("sdmc:/switch/swagent.log","ab");
-    if(!f) return errno ? (Result)errno : 1;
+    FsFileSystem *fs=fsdevGetDeviceFileSystem("sdmc");
+    if(!fs) return MAKERESULT(Module_Libnx,LibnxError_NotFound);
+    fsFsCreateDirectory(fs,"/switch");
+    fsFsCreateFile(fs,"/switch/swagent.log",0,0);
+    FsFile f;
+    Result rc=fsFsOpenFile(fs,"/switch/swagent.log",FsOpenMode_Write|FsOpenMode_Append,&f);
+    if(rc) return rc;
+    s64 offset=0;
+    rc=fsFileGetSize(&f,&offset);
     const char line[]="reboot: requested\n";
-    bool ok=fwrite(line,1,sizeof(line)-1,f)==sizeof(line)-1;
-    if(fflush(f)!=0) ok=false;
-    if(fclose(f)!=0) ok=false;
-    return ok ? 0 : 1;
+    if(!rc) rc=fsFileWrite(&f,offset,line,sizeof(line)-1,FsWriteOption_Flush);
+    fsFileClose(&f);
+    return rc;
 }
 Result sa_reboot(void) {
     Result rc=bpcInitialize();
