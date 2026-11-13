@@ -16,7 +16,7 @@
 #ifndef SA_NRO
 u32 __nx_applet_type = AppletType_None;
 #endif
-const char *sa_version(void) { return "swagent-1.34-rs"; }
+const char *sa_version(void) { return "swagent-1.35-rs"; }
 int sa_is_nro(void) {
 #ifdef SA_NRO
     return 1;
@@ -166,7 +166,20 @@ static void log_writer(void *arg) {
         if(ok) log_cache(line,n);
     }
 }
+/* Written/read only by the 6000 listener owner. Never used by heartbeat. */
+static unsigned long long listener_old_generation,listener_generation,listener_requested;
+static int listener_attempt_fd=-1;
+void sa_listener_context(unsigned long long old,unsigned long long next,unsigned long long requested) {
+    listener_old_generation=old;listener_generation=next;listener_requested=requested;listener_attempt_fd=-1;
+}
 static void sa_trace(const char *step,int rc) {
+    if (!strncmp(step,"listener-",9)) {
+        char detail[384];
+        snprintf(detail,sizeof(detail),"listener stage=%s reason=socket-operation old_generation=%llu new_generation=%llu fd=%d request_uptime_ms=%llu handled_uptime_ms=%llu rc=%d errno=%d",
+            step,listener_old_generation,listener_generation,listener_attempt_fd,listener_requested,(unsigned long long)sa_now_ms(),rc,rc<0?-rc:0);
+        sa_persist(detail,strlen(detail));
+        return;
+    }
     char line[192]; snprintf(line,sizeof(line),"boot uptime_ms=%llu step=%s %s rc=%d",(unsigned long long)sa_now_ms(),step,rc?"fail":"ok",rc);
     sa_persist(line,strlen(line));
 }
@@ -184,7 +197,9 @@ static Thread threads[8];
 static bool thread_started[8];
 static Mutex listener_lock;
 static int listener_fd=-1;
-/* Includes sockets still connecting, so exit can interrupt every network lane. */
+/* Only accepted 6000 clients and outbound sockets enter this registry.
+ * Never register the 6000 listener: reset/watchdog lanes must not close it.
+ * Heartbeat descriptors are exclusively owned and closed by its own lane. */
 static int active_sockets[32]; /* fd+1; zero is an unused slot */
 static int track_socket(int fd) {
     if (fd < 0) return fd;
@@ -199,6 +214,8 @@ static int track_socket(int fd) {
     errno=ECANCELED;
     return -1;
 }
+/* Registry-only close: an unknown fd may have been reused for a file.
+ * Do not fall back to raw close. Callers must relinquish ownership once. */
 int sa_close(int fd) {
     mutexLock(&listener_lock);
     int result=0;
@@ -210,6 +227,8 @@ int sa_close(int fd) {
     mutexUnlock(&listener_lock);
     return result;
 }
+/* Called only by the 6000 listener thread, before binding its replacement.
+ * Neither watchdog nor generic socket cleanup may use this entry point. */
 void sa_listener_close(int fd) {
     mutexLock(&listener_lock);
     if (listener_fd==fd) { listener_fd=-1; close(fd); }
@@ -237,7 +256,6 @@ static u32 sa_net_init(void) {
 }
 static void reset_network_sockets(void) {
     mutexLock(&listener_lock);
-    if (listener_fd>=0) { shutdown(listener_fd,SHUT_RDWR); close(listener_fd); listener_fd=-1; }
     for (unsigned i=0;i<32;i++) if (active_sockets[i]) {
         int fd=active_sockets[i]-1;
         shutdown(fd,SHUT_RDWR);
@@ -289,7 +307,9 @@ void sa_timeout(int fd, int seconds) {
 }
 static int listen_socket(void) {
     sa_trace("listener-bind-start",0);
-    int fd = socket(AF_INET,SOCK_STREAM,0); if (fd < 0) return -errno;
+    int fd = socket(AF_INET,SOCK_STREAM,0);
+    listener_attempt_fd=fd;
+    if (fd < 0) { int e=errno; sa_trace("listener-socket",-e); return -e; }
     int one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
     struct sockaddr_in a = {.sin_family=AF_INET,.sin_port=htons(6000),.sin_addr={INADDR_ANY}};
     sa_trace("listener-socket",0);
@@ -303,7 +323,7 @@ static int listen_socket(void) {
     sa_trace("listener-listen",0);
     /* Poll accept so worker connect failures can wake the recovery loop even
      * when no client is connected. Do not rely on accept honoring RCVTIMEO. */
-    if (fcntl(fd,F_SETFL,O_NONBLOCK) < 0) { int e=errno; close(fd); return -e; }
+    if (fcntl(fd,F_SETFL,O_NONBLOCK) < 0) { int e=errno; sa_trace("listener-nonblocking",-e); close(fd); return -e; }
     sa_trace("listener-bind-listen",0); return fd;
 }
 int sa_listen(void) {
@@ -316,28 +336,17 @@ int sa_listen(void) {
 #endif
     return result;
 }
-/* Probe listener metadata, not recv(0): recv on a listening socket is invalid.
- * Only close the registered listener under its ownership lock. */
+/* Owner-only metadata probe. No descriptor mutation, including on failure. */
 int sa_listener_health(int fd, int stale) {
-    mutexLock(&listener_lock);
-    int bad=listener_fd!=fd;
-    if (!bad) {
-        struct sockaddr_in addr; socklen_t len=sizeof(addr);
-        int accepting=0, error=0; socklen_t opt=sizeof(int);
-        bad=stale || getsockname(fd,(void*)&addr,&len)<0 ||
-            getsockopt(fd,SOL_SOCKET,SO_ACCEPTCONN,&accepting,&opt)<0 || !accepting;
-        opt=sizeof(int);
-        if (!bad) bad=getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&opt)<0 || error;
-        if (bad) {
-            sa_trace("listener-watchdog-shutdown-start",0);
-            shutdown(fd,SHUT_RDWR);
-            sa_trace("listener-watchdog-close-start",0);
-            close(fd); listener_fd=-1;
-            sa_trace("listener-watchdog-closed",0);
-        }
-    }
-    mutexUnlock(&listener_lock);
-    return bad;
+    struct sockaddr_in addr; socklen_t len=sizeof(addr);
+    int accepting=0, error=0; socklen_t opt=sizeof(int);
+    if (stale) return -ETIMEDOUT;
+    if (getsockname(fd,(void*)&addr,&len)<0 ||
+        getsockopt(fd,SOL_SOCKET,SO_ACCEPTCONN,&accepting,&opt)<0) return -errno;
+    if (!accepting) return -EINVAL;
+    opt=sizeof(int);
+    if (getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&opt)<0) return -errno;
+    return -error;
 }
 int sa_accept(int fd) {
     int client=accept(fd,NULL,NULL);
@@ -907,7 +916,11 @@ u32 sa_dump_ticket(u32 storage,const NcmContentInfo *infos,u32 count,u8 *rights,
     fsFsClose(&fs); return rc;
 }
 
-/* Heartbeat owns its descriptors exclusively: no SD, logging or ownership mutex. */
+/* Heartbeat owns its descriptors exclusively: no SD, logging or ownership mutex.
+ * These fds never enter the shared registry. Raw close is safe only here:
+ * the heartbeat owner holds a live socket from listen/accept, closes it once,
+ * and immediately discards it. Never pass a 6000 listener or arbitrary fd. */
+int sa_heartbeat_close(int fd) { return close(fd); }
 int sa_heartbeat_listen(void) {
     int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0)return -errno;
     int one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
@@ -919,7 +932,7 @@ int sa_heartbeat_listen(void) {
 }
 int sa_heartbeat_accept(int fd) {
     int c=accept(fd,NULL,NULL);
-    if(c>=0 && fcntl(c,F_SETFL,O_NONBLOCK)<0) { close(c); return -1; }
+    if(c>=0 && fcntl(c,F_SETFL,O_NONBLOCK)<0) { int e=errno; close(c); errno=e; return -1; }
     return c;
 }
 int sa_heartbeat_health(int fd) {

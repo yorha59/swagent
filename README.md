@@ -229,7 +229,7 @@ unknown (e.g. chunked transfer), a 206 resume is rejected rather than guessed.
 
 Run `make nro` and copy `dist/switch/swagent.nro` to `/switch/swagent.nro`
 on the SD card. Launch it in hbmenu through Album. After binding, the console
-prints `swagent-1.34-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
+prints `swagent-1.35-rs listening IP:6000 (press HOME to exit)` with the LAN IP.
 The listener binds all interfaces. If the sysmodule owns port 6000, the NRO
 shows a busy message and retries every five seconds, taking over automatically
 when the port becomes available. PLUS displays the HOME instruction while waiting.
@@ -242,7 +242,7 @@ handlers and the reusable 4 MiB install chunk. The resident edition uses its
 applet/HID/FS startup. It initializes the console before starting network workers,
 skips resident sleep-setting recovery, firmware probing and the SD log writer,
 and prints the endpoint only from the console thread.
-`version` reports `swagent-1.34-rs nro` or `swagent-1.34-rs sys`.
+`version` reports `swagent-1.35-rs nro` or `swagent-1.35-rs sys`.
 The `update` command retains its resident sysmodule update behavior.
 
 `make nro` uses official devkitPro `elf2nro` and libnx crt0/relocation handling.
@@ -329,7 +329,7 @@ console after each status print and every 100ms while polling PLUS. Bind
 failures retry every five seconds; a busy port shows the sysmodule warning,
 and successful takeover displays the LAN IP and port.
 
-Version 1.32 (`swagent-1.34-rs`) leaves NRO teardown to the system. Press HOME
+Version 1.32 (`swagent-1.35-rs`) leaves NRO teardown to the system. Press HOME
 to exit. PLUS only prints `press HOME to exit` and refreshes the console; main
 never returns, including when the applet loop reports exit or startup fails.
 Workers keep running until system teardown. Bare `quit` disconnects the client.
@@ -417,3 +417,41 @@ are required. A log write failure prevents reboot and returns an error.
 If bpc returns, its result is logged and the service remains available.
 With hekate autoboot configured, the console returns to emuMMC CFW and the
 resident swagent starts again. The receipt confirms the request, not boot success.
+
+
+### Listener recovery protocol (1.35)
+
+Port 6000 has one socket owner: the listener thread. The watchdog publishes
+metadata requests only; it does not probe, shutdown, close, or create the socket.
+The owner probes metadata and polls nonblocking accept, consumes requests,
+closes the old descriptor, then increments the generation before attempting
+socket/bind/listen. The update worker also leaves listener close to its owner.
+No recovery path resets the BSD service or the independent 6001 heartbeat lane.
+
+Requests contain a monotonically increasing sequence, target generation, reason,
+and uptime. Consecutive requests for one generation coalesce. A request for an
+old generation is rejected; one arriving just before the generation advances is
+acknowledged without touching the new descriptor. Requests for the generation
+being built survive until the next owner iteration. Failed rebuilds wait 250ms
+(5s minimum for NRO), doubling to 30s; successful bind/listen resets the delay.
+Transient accept errors wait 20ms; hard accept errors wait 100ms before rebuilding.
+Request storms do not bypass failed-build backoff.
+
+Persistent logs record request/process/rebuild result, reason, old/new generation,
+fd, request/handling uptime, rc and errno. Native stage records distinguish socket,
+bind and listen results, including the attempted fd on failure. These records are
+emitted on transitions, not on each accept poll. Existing 1MB rotation and close
+after each log write are unchanged.
+
+`rebuild-success health=unverified` means only that bind/listen/nonblocking setup
+completed. Only a successful `pong` send on a connection admitted by that same
+generation produces `application-reply health=reply-sent`; this is emitted once
+per generation. Peer receipt remains unverified: no internal loopback is used.
+For device validation, query 6001 and reconnect to 6000 and send `ping\r\n`,
+then correlate the received pong with the generation logs. An old accepted client
+cannot confirm a newly rebuilt listener. If the owner is permanently stuck inside
+an OS call, requests remain pending; no watchdog can forcibly free that call under
+this ownership protocol. The missing process/new-generation logs make this boundary
+visible. Sleep/resume as an original trigger remains unproven by host tests.
+
+发布前必须运行 `make release-check`（亦可 `make check`）。两者均强制真实 TCP 6001 bind、128 次重复连接及恢复期间 pong 验证；bind 不可用会打印明确 SKIP 原因并使验证 exit 非零，不能视为通过。默认 cargo test 同样禁止跳过后通过。版本保持 1.35。

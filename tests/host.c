@@ -12,13 +12,65 @@
 #include <string.h>
 #include <errno.h>
 #include <stdatomic.h>
+#include <pthread.h>
+/* Audit every host shim and Rust close/shutdown, including direct calls. */
+static atomic_int audit_count;
+static struct {atomic_int op,fd; atomic_uint_fast64_t tid;} audit[65536];
+static void audit_op(int op,int fd){int i=atomic_fetch_add(&audit_count,1);if(i<65536){atomic_store(&audit[i].op,op);atomic_store(&audit[i].fd,fd);atomic_store(&audit[i].tid,(uint64_t)(uintptr_t)pthread_self());}}
+int host_close(int fd){audit_op(1,fd);return close(fd);}
+int host_shutdown(int fd,int how){audit_op(2,fd);return shutdown(fd,how);}
+int host_audit_count(void){return atomic_load(&audit_count);}
+uint64_t host_audit_field(int i,int field){return field==0?(uint64_t)atomic_load(&audit[i].op):field==1?(uint64_t)atomic_load(&audit[i].fd):atomic_load(&audit[i].tid);}
+#define close host_close
+#define shutdown host_shutdown
+/* Same registry-only close semantics as production; raw close stays available
+ * for files, pre-registration failures and heartbeat's exclusive sockets. */
+static pthread_mutex_t listener_lock = PTHREAD_MUTEX_INITIALIZER;
+static int active_sockets[32];
+static _Thread_local int listener_fd=-1;
+static void mutexLock(pthread_mutex_t *m){pthread_mutex_lock(m);}
+static void mutexUnlock(pthread_mutex_t *m){pthread_mutex_unlock(m);}
+int sa_stopping(void);
+static int track_socket(int fd) {
+    if (fd < 0) return fd;
+    mutexLock(&listener_lock);
+    if (!sa_stopping()) for (unsigned i=0;i<32;i++) if (!active_sockets[i]) {
+        active_sockets[i]=fd+1;
+        mutexUnlock(&listener_lock);
+        return fd;
+    }
+    close(fd);
+    mutexUnlock(&listener_lock);
+    errno=ECANCELED;
+    return -1;
+}
+int sa_close(int fd) {
+    mutexLock(&listener_lock);
+    int result=0;
+    for (unsigned i=0;i<32;i++) if (active_sockets[i]==fd+1) {
+        active_sockets[i]=0;
+        result=close(fd);
+        break;
+    }
+    mutexUnlock(&listener_lock);
+    return result;
+}
+int sa_heartbeat_close(int fd) { return close(fd); }
+static _Thread_local int virtual_clock;
+static _Thread_local uint64_t virtual_ms,listen_times[1024];
+static _Thread_local int listen_times_count;
+uint64_t host_listen_time(int i){return listen_times[i];}
+static _Thread_local void (*sleep_hook)(void);
+void host_virtual_clock(int enabled){virtual_clock=enabled;virtual_ms=0;if(enabled)listen_times_count=0;}
+void host_sleep_hook(void (*hook)(void)){sleep_hook=hook;}
+uint64_t host_virtual_ms(void){return virtual_ms;}
 typedef struct {uint32_t fd,rest[3];} Service;
 static void path(const char *p,char *out) {
     if(p[0]=='/'){snprintf(out,1024,"%s",p);return;}
     const char *root=getenv("SWAGENT_TEST_ROOT");if(!root)root="build/host-sd";
     const char *colon=strchr(p,':');snprintf(out,1024,"%s%s",root,colon?colon+1:p);
 }
-uint32_t svcSleepThread(int64_t n){if(n!=5000000000LL)usleep(n/1000);return 0;}
+uint32_t svcSleepThread(int64_t n){if(virtual_clock){virtual_ms+=n/1000000;if(sleep_hook)sleep_hook();}else if(n!=5000000000LL)usleep(n/1000);return 0;}
 static _Thread_local const char *receive_fixture;
 static _Thread_local size_t receive_offset, receive_length;
 static _Thread_local char fixture_request[2048];
@@ -54,12 +106,12 @@ extern int host_test_connect(uint16_t port);
 int sa_connect(const char *host,const char *port){
     if(atomic_load(&connect_blocked)){atomic_store(&connect_entered,1);while(atomic_load(&connect_blocked))usleep(1000);errno=ECONNREFUSED;return -1;}
     if(connect_failure){errno=connect_failure;return -1;}
-    if(receive_fixture){if(fixture_connects && reconnect_fixture){receive_fixture=reconnect_fixture;receive_length=strlen(receive_fixture);}fixture_connects++;receive_offset=0;return open("/dev/null",O_RDONLY);}
-    if(!strcmp(host,"127.0.0.1")){int fd=host_test_connect((uint16_t)atoi(port));if(fd<0)errno=ECONNREFUSED;return fd;}
+    if(receive_fixture){if(fixture_connects && reconnect_fixture){receive_fixture=reconnect_fixture;receive_length=strlen(receive_fixture);}fixture_connects++;receive_offset=0;return track_socket(open("/dev/null",O_RDONLY));}
+    if(!strcmp(host,"127.0.0.1")){int fd=host_test_connect((uint16_t)atoi(port));if(fd<0)errno=ECONNREFUSED;return track_socket(fd);}
     struct addrinfo hints={.ai_family=AF_INET,.ai_socktype=SOCK_STREAM},*ai=NULL;
     if(getaddrinfo(host,port,&hints,&ai))return -1;
     int fd=socket(AF_INET,SOCK_STREAM,0);int rc=connect(fd,ai->ai_addr,ai->ai_addrlen);
-    freeaddrinfo(ai);if(rc){close(fd);return -1;}return fd;
+    freeaddrinfo(ai);if(rc){close(fd);return -1;}return track_socket(fd);
 }
 uint32_t sa_open(const char *p,int write,Service *s){char out[1024];path(p,out);int fd=open(out,write?(O_CREAT|O_RDWR|(write==1?O_TRUNC:0)):O_RDONLY,0600);if(fd<0)return errno;s->fd=fd;return 0;}
 uint32_t sa_remove(const char *p){char out[1024];path(p,out);return unlink(out)?errno:0;}
@@ -187,20 +239,28 @@ void sa_timeout(int fd,int seconds) {
 #include <time.h>
 static atomic_uint_fast64_t clock_offset;
 void host_clock_offset(uint64_t ms){atomic_store(&clock_offset,ms);}
-uint64_t sa_now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000+atomic_load(&clock_offset); }
+uint64_t sa_now_ms(void) { if(virtual_clock)return virtual_ms; struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000+atomic_load(&clock_offset); }
 static _Thread_local int mock_listen_errno;
 void host_listen_failure(int error){mock_listen_errno=error;}
 static _Thread_local int mock_listener, mock_accept=-1, mock_accept_errno;
 void host_listener_fixture(int enabled,int client,int error) { mock_listener=enabled; mock_accept=client; mock_accept_errno=error; }
-int sa_listen(void) { if(mock_listen_errno)return -mock_listen_errno; if(mock_listener)return open("/dev/null",O_RDONLY); int fd=socket(AF_INET,SOCK_STREAM,0),one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one)); struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(6000),.sin_addr={htonl(INADDR_LOOPBACK)}}; if(bind(fd,(void*)&a,sizeof(a))||listen(fd,4)){int e=errno;close(fd);return -e;} fcntl(fd,F_SETFL,O_NONBLOCK);return fd; }
-int sa_accept(int fd) { if(mock_listener) { if(mock_accept<0) { errno=mock_accept_errno;return -1; } int client=mock_accept;mock_accept=-1;fcntl(client,F_SETFL,O_NONBLOCK);return client; } return accept(fd,NULL,NULL); }
+void sa_listener_context(uint64_t old,uint64_t next,uint64_t requested) {(void)old;(void)next;(void)requested;}
+static atomic_int listener_closes;
+static _Thread_local int listener_opens;
+static _Thread_local void (*listen_hook)(void);
+void host_listen_hook(void (*hook)(void)){listen_hook=hook;}
+int host_listener_count(int closes){return closes?atomic_load(&listener_closes):listener_opens;}
+static _Thread_local uint64_t last_listen_ms;
+uint64_t host_last_listen_ms(void){return last_listen_ms;}
+int sa_listen(void) { last_listen_ms=sa_now_ms();if(virtual_clock && listen_times_count<1024)listen_times[listen_times_count++]=last_listen_ms;listener_opens++;if(listen_hook){void (*hook)(void)=listen_hook;listen_hook=NULL;hook();} if(mock_listen_errno)return -mock_listen_errno; if(mock_listener)return listener_fd=socket(AF_INET,SOCK_STREAM,0); int fd=socket(AF_INET,SOCK_STREAM,0),one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one)); struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(6000),.sin_addr={htonl(INADDR_LOOPBACK)}}; if(bind(fd,(void*)&a,sizeof(a))||listen(fd,4)){int e=errno;close(fd);return -e;} fcntl(fd,F_SETFL,O_NONBLOCK);return listener_fd=fd; }
+int sa_accept(int fd) { if(mock_listener) { if(mock_accept<0) { errno=mock_accept_errno;return -1; } int client=mock_accept;mock_accept=-1;fcntl(client,F_SETFL,O_NONBLOCK);return track_socket(client); } return track_socket(accept(fd,NULL,NULL)); }
 
 #include <pthread.h>
 uint64_t sa_thread_id(void) { return (uint64_t)(uintptr_t)pthread_self(); }
 
 int sa_nonblocking(int fd) { int flags=fcntl(fd,F_GETFL); return flags>=0 && (flags&O_NONBLOCK); }
 
-const char *sa_version(void) { return "swagent-1.34-rs"; }
+const char *sa_version(void) { return "swagent-1.35-rs"; }
 static _Thread_local int host_nro, host_quit;
 void host_edition(int nro) { host_nro=nro; host_quit=0; }
 int host_did_quit(void) { return host_quit; }
@@ -219,10 +279,11 @@ void sa_jobs_init(void) { pthread_mutex_lock(&jobs_mutex); jobs_count=0; pthread
 void sa_jobs_signal(void) { pthread_mutex_lock(&jobs_mutex); jobs_count++; pthread_cond_signal(&jobs_cond); pthread_mutex_unlock(&jobs_mutex); }
 void sa_jobs_wait(void) { pthread_mutex_lock(&jobs_mutex); while(!jobs_count) pthread_cond_wait(&jobs_cond,&jobs_mutex); jobs_count--; pthread_mutex_unlock(&jobs_mutex); }
 
+static atomic_int heartbeat_stop,heartbeat_fd,heartbeat_error;
 static _Thread_local int heartbeat_test_run;
 void host_heartbeat_run(void){heartbeat_test_run=1;}
-int sa_stopping(void) { return heartbeat_test_run==2; }
-void sa_listener_close(int fd) { close(fd); }
+int sa_stopping(void) { return heartbeat_test_run==2 || atomic_load(&heartbeat_stop); }
+void sa_listener_close(int fd) { if(listener_fd==fd){listener_fd=-1;atomic_fetch_add(&listener_closes,1);close(fd);} }
 
 uint32_t sa_dump_meta(uint64_t title,uint32_t *storage,void *infos,uint32_t capacity,uint32_t *count) {
     (void)title;(void)storage;(void)infos;(void)capacity;(void)count;return 2;
@@ -239,16 +300,47 @@ uint32_t sa_dump_mkdir(const char *p) { char out[1024]; path(p,out); return mkdi
 static _Thread_local int health_failure;
 void host_listener_health_failure(int bad) { health_failure=bad; }
 int sa_listener_health(int fd,int stale) {
-    if(health_failure || stale) { close(fd); return 1; }
+    if(health_failure || stale) { return -EBADF; }
+    (void)fd;
     return 0;
 }
 
 static _Thread_local int log_disabled;
 void host_log_disabled(int disabled){log_disabled=disabled;}
 int sa_log_alive(void){return !log_disabled;}
-int sa_heartbeat_listen(void){return sa_listen();}
-int sa_heartbeat_accept(int fd){if(heartbeat_test_run && mock_accept<0){heartbeat_test_run=2;errno=EAGAIN;return -1;}return sa_accept(fd);}
-int sa_heartbeat_health(int fd){(void)fd;return 1;}
+
+int host_heartbeat_error(void){return atomic_load(&heartbeat_error);}
+void host_heartbeat_stop(int stop){atomic_store(&heartbeat_stop,stop);if(!stop)atomic_store(&heartbeat_error,0);}
+int host_heartbeat_fd(void){return atomic_load(&heartbeat_fd);}
+static atomic_int heartbeat_nonblocking_errno, heartbeat_health_failure;
+void host_heartbeat_nonblocking_failure(int error){atomic_store(&heartbeat_nonblocking_errno,error);}
+void host_heartbeat_health_failure(int bad){atomic_store(&heartbeat_health_failure,bad);}
+static int heartbeat_nonblocking(int fd){
+    int e=atomic_load(&heartbeat_nonblocking_errno);
+    if(e){errno=e;return -1;}
+    return fcntl(fd,F_SETFL,O_NONBLOCK);
+}
+int sa_heartbeat_listen(void){
+    int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0)return -errno;
+    int one=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
+    struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(6001),.sin_addr={htonl(INADDR_LOOPBACK)}};
+    if((!heartbeat_test_run && (bind(fd,(void*)&a,sizeof(a))<0 || listen(fd,8)<0)) || heartbeat_nonblocking(fd)<0){
+        int e=errno;atomic_store(&heartbeat_error,e);close(fd);return -e;
+    }
+    atomic_store(&heartbeat_fd,fd);return fd;
+}
+int sa_heartbeat_accept(int fd){
+    if(heartbeat_test_run && mock_accept<0){heartbeat_test_run=2;errno=EAGAIN;return -1;}
+    int c;if(heartbeat_test_run){c=mock_accept;mock_accept=-1;}else c=accept(fd,NULL,NULL);
+    if(c>=0 && heartbeat_nonblocking(c)<0){int e=errno;close(c);errno=e;return -1;}
+    return c;
+}
+int sa_heartbeat_health(int fd){
+    int accepting=0,error=0; socklen_t n=sizeof(int);
+    if(atomic_load(&heartbeat_health_failure))return 0;
+    if(getsockopt(fd,SOL_SOCKET,SO_ACCEPTCONN,&accepting,&n)<0 || !accepting)return 0;
+    n=sizeof(int);return getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&n)==0 && !error;
+}
 
 static atomic_int reboot_calls, reboot_logged, reboot_log_rc;
 void host_reboot_reset(void){atomic_store(&reboot_calls,0);atomic_store(&reboot_logged,0);atomic_store(&reboot_log_rc,0);}
