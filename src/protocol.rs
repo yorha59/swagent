@@ -14,10 +14,11 @@ struct Session {
     fd: i32,
     id: u64,
     sending: bool,
+    listener_generation: u64,
 }
 const CLIENTS: usize = 4;
 static SESSIONS: [Lock<Session>; CLIENTS] =
-    [const { Lock::new(Session { fd: -1, id: 0, sending: false }) }; CLIENTS];
+    [const { Lock::new(Session { fd: -1, id: 0, sending: false, listener_generation: 0 }) }; CLIENTS];
 fn session(id: u64) -> &'static Lock<Session> {
     &SESSIONS[id as usize % CLIENTS]
 }
@@ -698,14 +699,7 @@ pub(crate) fn reboot(id: u64, delay_ms: u64) -> Result {
 fn update(id: u64, url: &str) -> Result {
     apply_update(url)?;
     RETIRING.store(true, Release);
-    // Release server first, then client, before asking PM to terminate us.
-    let listener = LISTENER.swap(-1, AcqRel);
-    if listener >= 0 {
-        unsafe {
-            ffi::shutdown(listener, 2);
-            ffi::sa_listener_close(listener);
-        }
-    }
+    // Listener owner observes RETIRING and releases its own descriptor.
     let _ = reply(id, b"update: ok");
     disconnect(id);
     sleep(500);
@@ -775,7 +769,15 @@ fn receive(id: u64, line: Text<512>) {
             return;
         }
         Some("ping") if words.next().is_none() => {
-            let _ = reply(id, b"pong");
+            if reply(id, b"pong").is_ok() {
+                let generation = RECOVERY.with(|r| r.generation);
+                let accepted_generation = session(id).with(|s| s.listener_generation);
+                if accepted_generation == generation && HEALTH_GENERATION.swap(generation, AcqRel) != generation {
+                    let mut line = Text::<256>::new();
+                    let _ = write!(line, "listener event=application-reply generation={generation} uptime_ms={} health=reply-sent peer_receipt=unverified", now_ms());
+                    log::add(line.str());
+                }
+            }
             return;
         }
         Some("status") if words.next().is_none() => {
@@ -1031,6 +1033,7 @@ fn admit(fd: i32) -> bool {
         SESSIONS[slot].with(|s| {
             s.fd = fd;
             s.id = id;
+            s.listener_generation = RECOVERY.with(|r| r.generation);
         });
         CLIENT_READY[slot].store(true, Release);
         log::add("client connected");
@@ -1049,6 +1052,8 @@ fn listener_step(server: i32) -> bool {
         let mut line = Text::<96>::new();
         let _ = write!(line, "listener: accept failed errno={e}; recreating");
         log::add(line.str());
+        let generation = RECOVERY.with(|r| r.generation);
+        request_rebuild_error(generation, -e, "accept-error", now_ms());
         return false;
     }
     unsafe {
@@ -1065,16 +1070,57 @@ fn listener_step(server: i32) -> bool {
     }
     true
 }
+fn next_listener_delay(delay: u64) -> u64 { delay.saturating_mul(2).min(30_000) }
 static LISTENER_DELAY: AtomicU64 = AtomicU64::new(250);
 static LISTENER_BEAT: AtomicU64 = AtomicU64::new(0);
-static LISTENER_RESTART: AtomicBool = AtomicBool::new(false);
+// This mailbox contains metadata only. The watchdog never calls a socket API.
+#[derive(Clone, Copy)]
+struct Recovery {
+    generation: u64,
+    requested: u64,
+    target: u64,
+    handled: u64,
+    reason: &'static str,
+    uptime: u64,
+    rc: i32,
+}
+impl Recovery {
+    const fn new() -> Self { Self { generation: 0, requested: 0, target: 0, handled: 0, reason: "startup", uptime: 0, rc: 0 } }
+    fn request(&mut self, generation: u64, reason: &'static str, uptime: u64) -> bool {
+        if generation != self.generation { return false; }
+        self.requested += 1;
+        self.target = generation;
+        self.reason = reason;
+        self.uptime = uptime;
+        true
+    }
+    fn take(&mut self) -> Option<Self> {
+        if self.requested == self.handled { return None; }
+        let request = *self;
+        self.handled = self.requested;
+        if request.target != self.generation { return None; }
+        Some(request)
+    }
+}
+static HEALTH_GENERATION: AtomicU64 = AtomicU64::new(u64::MAX);
+static RECOVERY: Lock<Recovery> = Lock::new(Recovery::new());
+fn request_rebuild_error(generation: u64, rc: i32, reason: &'static str, now: u64) {
+    let accepted = RECOVERY.with(|r| { let accepted=r.request(generation, reason, now); if accepted {r.rc=rc;} accepted });
+    if accepted { recovery_log("request", reason, generation, generation, LISTENER.load(Acquire), now, rc); }
+}
+fn request_rebuild(generation: u64, reason: &'static str, now: u64) {
+    request_rebuild_error(generation, 0, reason, now);
+}
+fn recovery_log(event: &str, reason: &str, old: u64, new: u64, fd: i32, requested: u64, rc: i32) {
+    let mut line = Text::<512>::new();
+    let _ = write!(line, "listener event={event} reason={reason} rc={rc} errno={} old_generation={old} new_generation={new} fd={fd} request_uptime_ms={requested} handled_uptime_ms={} health=unverified", if rc<0 {-rc} else {0}, now_ms());
+    log::add(line.str());
+}
 pub(crate) fn listener_check(now: u64) {
-    let fd = LISTENER.load(Acquire);
-    if fd < 0 || retiring() { return; }
-    let stale = now.saturating_sub(LISTENER_BEAT.load(Acquire)) >= 60_000;
-    if unsafe { ffi::sa_listener_health(fd, stale as i32) } != 0 {
-        log::add("listener watchdog: unhealthy/stalled; closed; requesting fresh socket");
-        LISTENER_RESTART.store(true, Release);
+    if retiring() { return; }
+    let generation = RECOVERY.with(|r| r.generation);
+    if LISTENER.load(Acquire) >= 0 && now.saturating_sub(LISTENER_BEAT.load(Acquire)) >= 60_000 {
+        request_rebuild(generation, "watchdog-stale", now);
     }
 }
 pub extern "C" fn listener_watchdog(_: *mut core::ffi::c_void) {
@@ -1086,13 +1132,22 @@ pub extern "C" fn listener_watchdog(_: *mut core::ffi::c_void) {
 }
 fn serve_step(server: &mut i32) {
     LISTENER_BEAT.store(now_ms(), Release);
-    if LISTENER_RESTART.swap(false, AcqRel) {
+    let health = if *server >= 0 { unsafe { ffi::sa_listener_health(*server, 0) } } else {0};
+    if health != 0 {
+        let generation = RECOVERY.with(|r| r.generation);
+        request_rebuild_error(generation, health, "owner-network-health", now_ms());
+    }
+    if let Some(request) = RECOVERY.with(|r| r.take()) {
         LISTENER.store(-1, Release);
+        recovery_log("process", request.reason, request.generation, request.generation + 1, *server, request.uptime, request.rc);
         if *server >= 0 { unsafe { ffi::sa_listener_close(*server); } }
         *server = -1;
     }
     if *server < 0 {
+        let attempt = RECOVERY.with(|r| { let old=*r; r.generation+=1; (old, r.generation) });
+        unsafe { ffi::sa_listener_context(attempt.0.generation, attempt.1, attempt.0.uptime); }
         *server = unsafe { ffi::sa_listen() };
+        recovery_log(if *server<0 {"rebuild-failed"} else {"rebuild-success"}, attempt.0.reason, attempt.0.generation, attempt.1, *server, attempt.0.uptime, if *server<0 {*server} else {0});
         if *server < 0 {
             let mut line = Text::<96>::new();
             let _ = write!(line, "listener: listen failed errno={}; retrying", -*server);
@@ -1106,7 +1161,7 @@ fn serve_step(server: &mut i32) {
                 sleep(step);
                 remaining -= step;
             }
-            LISTENER_DELAY.store((delay * 2).min(30_000), Relaxed);
+            LISTENER_DELAY.store(next_listener_delay(delay), Relaxed);
             return;
         }
         LISTENER_DELAY.store(250, Relaxed);
@@ -1119,7 +1174,6 @@ fn serve_step(server: &mut i32) {
             ffi::sa_listener_close(*server);
         }
         *server = -1;
-        log::add("listener: closed; recreating");
         sleep(100);
     }
 }
@@ -1131,7 +1185,11 @@ pub fn serve() {
             if server >= 0 { unsafe { ffi::sa_listener_close(server); } }
             return;
         }
-        if retiring() { forever() }
+        if retiring() {
+            LISTENER.store(-1, Release);
+            if server >= 0 { unsafe { ffi::sa_listener_close(server); } }
+            forever()
+        }
         serve_step(&mut server);
     }
 }
@@ -1274,4 +1332,58 @@ pub fn test_client_timeout(slot: usize, timeout: u64) {
     let (fd,id) = SESSIONS[slot].with(|s| (s.fd,s.id));
     client_loop_timeout(fd,id,timeout);
     CLIENT_READY[slot].store(false,Release);
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn recovery_epochs_coalesce_reject_stale_and_preserve_inflight_request() {
+        let mut r = Recovery::new();
+        assert!(r.take().is_none());
+        assert!(r.request(0, "watchdog-stale", 10));
+        assert!(r.request(0, "accept-error", 11));
+        let request = r.take().unwrap();
+        assert_eq!(request.requested, 2);
+        assert_eq!(request.uptime, 11);
+        assert_eq!(request.reason, "accept-error");
+        assert!(r.take().is_none());
+        // Begin rebuilding. A delayed observation of the old listener is rejected.
+        r.generation += 1;
+        assert!(!r.request(0, "stale-observer", 12));
+        // A new request published during bind/listen survives completion.
+        assert!(r.request(1, "during-rebuild", 13));
+        assert_eq!(r.take().unwrap().target, 1);
+        r.generation += 1;
+        assert!(r.take().is_none());
+        // A request racing just before generation changes cannot close the new fd.
+        assert!(r.request(2, "before-build", 14));
+        r.generation += 1;
+        assert!(r.take().is_none());
+        assert!(!r.request(2, "delayed-old-request", 15));
+        assert!(r.request(3, "new-generation", 16));
+        assert_eq!(r.take().unwrap().uptime, 16);
+    }
+    #[test]
+    fn retry_backoff_is_bounded_and_never_spins() {
+        let mut delay = 250;
+        for expected in [500,1000,2000,4000,8000,16000,30000,30000] {
+            delay = next_listener_delay(delay);
+            assert_eq!(delay, expected);
+        }
+        assert_eq!(next_listener_delay(u64::MAX), 30000);
+    }
+}
+
+#[cfg(test)]
+pub fn test_recovery_snapshot() -> (u64, u64, u64, u64) {
+    RECOVERY.with(|r| (r.generation,r.requested,r.handled,LISTENER_DELAY.load(Relaxed)))
+}
+#[cfg(test)]
+pub fn test_rebuild_request(generation: u64) { request_rebuild(generation,"host-test",now_ms()); }
+
+#[cfg(test)]
+pub fn test_ping_generation(generation:u64) {
+    session(42).with(|s|s.listener_generation=generation);
+    let mut line=Text::new();line.push(b"ping").unwrap();receive(42,line);
 }

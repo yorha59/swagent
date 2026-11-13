@@ -30,7 +30,7 @@ pub(crate) fn reply(fd: i32) {
         if n==0 || !crate::net::transient(unsafe { ffi::sa_errno() }) { break; }
         sleep(5);
     }
-    unsafe { ffi::close(fd); }
+    unsafe { ffi::sa_heartbeat_close(fd); }
 }
 pub extern "C" fn serve(_: *mut core::ffi::c_void) {
     let mut fd=-1;
@@ -39,7 +39,7 @@ pub extern "C" fn serve(_: *mut core::ffi::c_void) {
         BEAT.store(now_ms(),Release);
         if RESTART.swap(false,AcqRel) && fd>=0 {
             LISTENER.store(-1,Release);
-            unsafe { ffi::close(fd); } fd=-1;
+            unsafe { ffi::sa_heartbeat_close(fd); } fd=-1;
         }
         if fd<0 {
             fd=unsafe { ffi::sa_heartbeat_listen() };
@@ -54,8 +54,8 @@ pub extern "C" fn serve(_: *mut core::ffi::c_void) {
         let client=unsafe { ffi::sa_heartbeat_accept(fd) };
         if client>=0 { reply(client); }
         else if crate::net::transient(unsafe { ffi::sa_errno() }) { sleep(20); }
-        else { LISTENER.store(-1,Release); unsafe { ffi::close(fd); } fd=-1; }
+        else { LISTENER.store(-1,Release); unsafe { ffi::sa_heartbeat_close(fd); } fd=-1; }
     }
     LISTENER.store(-1,Release);
-    if fd>=0 { unsafe { ffi::close(fd); } }
+    if fd>=0 { unsafe { ffi::sa_heartbeat_close(fd); } }
 }

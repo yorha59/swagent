@@ -81,14 +81,19 @@ extern "C" {
     pub fn sa_now_ms() -> u64;
     pub fn sa_spawn(slot: u32, entry: extern "C" fn(*mut c_void), arg: *mut c_void) -> u32;
     pub fn svcSleepThread(ns: i64) -> u32;
+    pub fn sa_listener_context(old: u64, new: u64, requested: u64);
     pub fn sa_listen() -> i32;
     pub fn sa_accept(fd: i32) -> i32;
     pub fn sa_listener_health(fd: i32, stale: i32) -> i32;
     pub fn sa_connect(host: *const c_char, port: *const c_char) -> i32;
     pub fn sa_timeout(fd: i32, secs: i32);
     pub fn sa_errno() -> i32;
-    #[cfg_attr(not(test), link_name = "sa_close")]
+    // Registry-only; excludes both listeners and heartbeat clients.
+    #[link_name = "sa_close"]
     pub fn close(fd: i32) -> i32;
+    // Heartbeat owner only: closes a live, exclusively owned raw socket once.
+    pub fn sa_heartbeat_close(fd: i32) -> i32;
+    #[cfg_attr(test, link_name = "host_shutdown")]
     pub fn shutdown(fd: i32, how: i32) -> i32;
     pub fn sa_recv(fd: i32, p: *mut u8, n: usize, flags: i32) -> isize;
     pub fn sa_send(fd: i32, p: *const u8, n: usize, flags: i32) -> isize;

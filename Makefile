@@ -1,4 +1,4 @@
-VERSION := 1.34
+VERSION := 1.35
 DEVKITPRO ?= $(HOME)/devkitpro
 export DEVKITPRO
 CARGO := $(HOME)/.cargo/bin/cargo
@@ -9,7 +9,7 @@ NX := $(DEVKITPRO)/libnx
 ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS := $(ARCH) -O2 -g -Wall -Wextra -ffunction-sections -fdata-sections -D__SWITCH__ -I$(NX)/include
 RUSTLIB := target/aarch64-unknown-none/release/libswagent.a
-.PHONY: all nro rust clean check
+.PHONY: all nro rust clean check release-check
 all: dist/atmosphere/contents/430000000000000B/exefs.nsp
 rust:
 	$(CARGO) build --release
@@ -41,10 +41,12 @@ dist/switch/swagent.nro: build/swagent-nro.elf build/control.nacp
 
 build/control.nacp: FORCE
 	$(DEVKITPRO)/tools/bin/nacptool --create "SWAgent" "Simon" "$(VERSION)" $@
+release-check: check
+
 check: all nro
 	mkdir -p build
 	cc -Wall -Wextra -c tests/host.c -o build/host.o
-	RUSTFLAGS="-C link-arg=$(CURDIR)/build/host.o -A dead_code" $(CARGO) test --target aarch64-apple-darwin
+	SWAGENT_REQUIRE_TCP=1 RUSTFLAGS="-C link-arg=$(CURDIR)/build/host.o -A dead_code" $(CARGO) test --target aarch64-apple-darwin
 	python3 tests/check_artifact.py
 	python3 tests/test_nro_packer.py
 	python3 tests/test_nro_entry.py

@@ -6,6 +6,7 @@ use std::{
 use util::Error;
 static SERIAL: Mutex<()> = Mutex::new(());
 extern "C" {
+    fn host_close(fd: i32) -> i32;
     fn host_reset(fail: u32);
     fn host_stat(n: u32) -> u32;
     fn host_launch_result(rc: u32);
@@ -595,7 +596,7 @@ fn ping_version_status_and_busy_while_install_worker_is_blocked() {
     let mut line = String::new();
     for (command, expected) in [
         ("ping", "pong\r\n"),
-        ("version", "swagent-1.34-rs sys\r\n"),
+        ("version", "swagent-1.35-rs sys\r\n"),
         ("status", "status: downloading rx=0 total=0\r\n"),
     ] {
         protocol::test_receive(command);
@@ -1636,7 +1637,7 @@ fn accept_responds_during_upload_and_recovers_after_listener_failure() {
     drop(upload_client); drop(reader); drop(new_reader);
     upload_lane.join().unwrap(); ping_lane.join().unwrap(); replacement_lane.join().unwrap();
     assert!(!std::path::Path::new("build/host-sd/switch/concurrent-upload").exists());
-    unsafe { ffi::close(listener); host_listener_fixture(0, -1, 0); }
+    unsafe { ffi::sa_listener_close(listener); host_listener_fixture(0, -1, 0); }
 }
 
 #[test]
@@ -1760,7 +1761,7 @@ fn nro_version_and_bare_quit() {
         protocol::test_receive("version");
         let mut line = String::new();
         client.read_line(&mut line).unwrap();
-        assert_eq!(line, format!("swagent-1.34-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
+        assert_eq!(line, format!("swagent-1.35-rs {}\r\n", if nro==1 { "nro" } else { "sys" }));
         protocol::test_receive("quit   ");
         line.clear();
         client.read_line(&mut line).unwrap();
@@ -1775,7 +1776,7 @@ fn nro_version_and_bare_quit() {
 
 #[test]
 fn boot_log_format_and_installed_confirmation() {
-    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.34-rs");
+    assert_eq!(log::boot_line(12345).str(),"boot uptime_ms=12345 version=swagent-1.35-rs");
     assert_eq!(installed::parse("installed").unwrap(),None);
     assert_eq!(installed::parse("installed del 430000000000000B del-430000000000000B-confirm").unwrap(),Some(0x430000000000000b));
     for line in ["installed del 430000000000000B", "installed del 430000000000000B confirm", "installed del 430000000000000B del-430000000000000b-confirm", "installed del xyz del-xyz-confirm", "installed extra", "installed del 430000000000000B del-430000000000000B-confirm extra"] {
@@ -1907,7 +1908,7 @@ fn put_one_megabyte_wire_roundtrip() {
     assert_eq!(std::fs::read("build/host-sd/switch/one-megabyte").unwrap(), body);
     drop(reader);
     worker.join().unwrap();
-    unsafe { ffi::close(listener); host_listener_fixture(0, -1, 0); }
+    unsafe { ffi::sa_listener_close(listener); host_listener_fixture(0, -1, 0); }
 }
 
 #[test]
@@ -2078,7 +2079,7 @@ fn nro_bind_failure_waits_five_seconds_then_takes_over() {
     protocol::test_serve_step(&mut listener);
     let took_over = listener >= 0;
     unsafe {
-        if listener >= 0 { ffi::close(listener); }
+        if listener >= 0 { ffi::sa_listener_close(listener); }
         host_listener_fixture(0, -1, 0);
         host_edition(0);
     }
@@ -2310,14 +2311,14 @@ fn idle_client_is_kicked_and_watchdog_recreates_listener() {
     protocol::listener_check(crate::util::now_ms());
     unsafe { host_listener_health_failure(1); }
     protocol::listener_check(crate::util::now_ms());
-    unsafe { host_listener_health_failure(0); }
     protocol::test_serve_step(&mut listener);
+    unsafe { host_listener_health_failure(0); }
     assert!(listener>=0);
     // Mock time exercises the stalled accept heartbeat independently of health.
     protocol::listener_check(crate::util::now_ms()+60_001);
     protocol::test_serve_step(&mut listener);
     assert!(listener>=0);
-    unsafe { ffi::close(listener); host_listener_fixture(0,-1,0); }
+    unsafe { ffi::sa_listener_close(listener); host_listener_fixture(0,-1,0); }
 }
 
 #[test]
@@ -2434,5 +2435,223 @@ fn reboot_rejects_arguments_and_failed_audit_without_bpc() {
         assert!(!line.contains("reboot: ok"));
         assert_eq!(unsafe { host_reboot_stat(0) }, 0);
     }
-    unsafe { ffi::close(fd); host_reboot_reset(); }
+    unsafe { host_close(fd); host_reboot_reset(); }
+}
+
+#[test]
+fn listener_owner_protocol_faults_backoff_and_heartbeat_independence() {
+    use std::{net::TcpStream, time::Duration};
+    unsafe extern "C" {
+        fn host_audit_count()->i32;
+        fn host_audit_field(i:i32,field:i32)->u64;
+        fn host_heartbeat_stop(stop:i32);
+        fn host_heartbeat_fd()->i32;
+        fn host_heartbeat_error()->i32;
+        fn host_heartbeat_health_failure(bad:i32);
+        fn host_virtual_clock(enabled:i32);
+        fn host_virtual_ms()->u64;
+        fn host_last_listen_ms()->u64;
+        fn host_listen_time(i:i32)->u64;
+        fn host_sleep_hook(hook:Option<extern "C" fn()>);
+        fn host_listener_fixture(enabled:i32, client:i32, error:i32);
+        fn host_listen_failure(error:i32);
+        fn host_listener_health_failure(bad:i32);
+        fn host_listener_count(closes:i32)->i32;
+        fn host_listen_hook(hook:Option<extern "C" fn()>);
+    }
+    static WAIT_OPENS:core::sync::atomic::AtomicI32=core::sync::atomic::AtomicI32::new(0);
+    extern "C" fn during_wait() {
+        during_build();
+        assert_eq!(unsafe{host_listener_count(0)},WAIT_OPENS.load(core::sync::atomic::Ordering::SeqCst),"request interrupted backoff");
+        pong();
+    }
+    extern "C" fn during_build() {
+        protocol::test_rebuild_request(protocol::test_recovery_snapshot().0);
+    }
+    // Release SERIAL before reporting an unavailable environment: no poison cascade.
+    let _guard=SERIAL.lock().unwrap();
+    let probe=unsafe{ffi::sa_heartbeat_listen()};
+    if probe<0 {
+        drop(_guard);
+        panic!("SKIP: real TCP 6001 bind unavailable (rc={probe}); required validation FAILED");
+    }
+    unsafe{ffi::sa_heartbeat_close(probe);}
+    setup();
+    unsafe {host_listener_fixture(1,-1,11);host_listen_failure(0);}
+    let mut fd=-1;
+    protocol::test_serve_step(&mut fd);
+    let initial=protocol::test_recovery_snapshot().0;
+    let closes=unsafe{host_listener_count(1)};
+    let old_fd=fd;
+    let audit_start=unsafe{host_audit_count()};
+    let owner=unsafe{ffi::sa_thread_id()};
+    unsafe{host_heartbeat_stop(0);}
+    let hb=std::thread::spawn(||heartbeat::serve(core::ptr::null_mut()));
+    fn pong() {
+        let mut c=(0..100).find_map(|_|match TcpStream::connect("127.0.0.1:6001") {
+            Ok(c)=>Some(c),Err(_)=>{std::thread::sleep(Duration::from_millis(5));None}
+        }).expect("6001 listener");
+        c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        c.write_all(b"p").unwrap();let mut bytes=[0;5];c.read_exact(&mut bytes).unwrap();assert_eq!(&bytes,b"pong\n");
+        assert_eq!(c.read(&mut [0]).unwrap(),0,"heartbeat client must close after pong");
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(unsafe{host_heartbeat_error()},0,"SKIP: real TCP 6001 bind unavailable; required validation FAILED (no skip-as-pass)");
+    pong();
+    let hb_fd=unsafe{host_heartbeat_fd()};
+    for _ in 0..128 { pong(); assert_eq!(unsafe{host_heartbeat_fd()},hb_fd); }
+    // Watchdog cannot close even when invoked on another thread; duplicate
+    // requests coalesce into one owner transition.
+    std::thread::spawn(||{
+        protocol::listener_check(util::now_ms()+60001);
+        protocol::listener_check(util::now_ms()+60002);
+    }).join().unwrap();
+    assert_eq!(unsafe{host_listener_count(1)},closes);
+
+    unsafe {host_listen_hook(Some(during_build));}
+    protocol::test_serve_step(&mut fd);
+    assert_eq!(unsafe{host_listener_count(1)},closes+1);
+    assert_eq!(protocol::test_recovery_snapshot().0,initial+1);
+    let events=(audit_start..unsafe{host_audit_count()}).filter(|&i|unsafe{host_audit_field(i,1)}==old_fd as u64).collect::<std::vec::Vec<_>>();
+    assert_eq!(events.len(),1);
+    assert_eq!(unsafe{host_audit_field(events[0],0)},1);
+    assert_eq!(unsafe{host_audit_field(events[0],2)},owner);
+    pong();
+    // The request made inside sa_listen is still pending after publication.
+    protocol::test_serve_step(&mut fd);
+    assert_eq!(unsafe{host_listener_count(1)},closes+2);
+    let current=protocol::test_recovery_snapshot().0;
+    protocol::test_rebuild_request(initial);
+    protocol::test_serve_step(&mut fd);
+    assert_eq!(protocol::test_recovery_snapshot().0,current);
+    assert_eq!(unsafe{host_listener_count(1)},closes+2);
+    pong();
+    // A connection accepted by an older generation cannot confirm this one.
+    {
+        use std::os::unix::{net::UnixStream,io::IntoRawFd};
+        let (server,mut client)=UnixStream::pair().unwrap();
+        let server_fd=server.into_raw_fd();
+        protocol::test_session(server_fd);
+        fn confirmations(g:u64)->usize {
+            let needle=std::format!("event=application-reply generation={g} ");
+            let mut count=0;log::dump(1000,|p|if std::str::from_utf8(p).unwrap().contains(&needle){count+=1;});count
+        }
+        let baseline=confirmations(current);
+        protocol::test_ping_generation(initial);
+        let mut bytes=[0;6];client.read_exact(&mut bytes).unwrap();
+        assert_eq!(confirmations(current),baseline);
+        protocol::test_ping_generation(current);client.read_exact(&mut bytes).unwrap();
+        protocol::test_ping_generation(current);client.read_exact(&mut bytes).unwrap();
+        assert_eq!(confirmations(current),baseline+1);
+        protocol::test_session(-1);
+        unsafe{host_close(server_fd);}
+    }
+    // Owner metadata failure and hard accept failure both recreate locally.
+    unsafe{host_listener_health_failure(1);}
+    protocol::test_serve_step(&mut fd);
+    unsafe{host_listener_health_failure(0);host_listener_fixture(1,-1,9);}
+    protocol::test_serve_step(&mut fd);assert_eq!(fd,-1);
+    for (reason,rc) in [("owner-network-health",-9),("accept-error",-9)] {
+        let needle=std::format!("event=request reason={reason} rc={rc} errno=9");
+        let mut found=false;log::dump(1000,|p|if std::str::from_utf8(p).unwrap().contains(&needle){found=true;});
+        assert!(found,"missing recovery error: {needle}");
+    }
+    unsafe{host_listener_fixture(1,-1,11);host_listen_failure(48);}
+    unsafe{host_virtual_clock(1);host_sleep_hook(Some(during_wait));}
+    let mut cumulative=0;
+    for delay in [250,500,1000,2000,4000,8000,16000,30000,30000] {
+        let before=unsafe{host_virtual_ms()};
+        let opens=unsafe{host_listener_count(0)};
+        WAIT_OPENS.store(opens+1,core::sync::atomic::Ordering::SeqCst);
+        protocol::test_serve_step(&mut fd);assert_eq!(fd,-48);
+        assert_eq!(unsafe{host_last_listen_ms()},before);
+        cumulative+=delay;
+        assert_eq!(unsafe{host_virtual_ms()},cumulative);
+        assert_eq!(unsafe{host_virtual_ms()}-before,delay);
+        assert_eq!(unsafe{host_listener_count(0)},opens+1);
+        pong();
+    }
+    for (i,time) in [0,250,750,1750,3750,7750,15750,31750,61750].iter().enumerate() {
+        assert_eq!(unsafe{host_listen_time(i as i32)},*time);
+    }
+    unsafe{host_sleep_hook(None);host_virtual_clock(0);}
+    unsafe{host_listen_failure(0);}
+    protocol::test_serve_step(&mut fd);assert!(fd>=0);
+    assert_eq!(protocol::test_recovery_snapshot().3,250);
+    pong();
+    for i in audit_start..unsafe{host_audit_count()} {
+        assert_ne!(unsafe{host_audit_field(i,1)},hb_fd as u64,"6000 recovery touched 6001 listener");
+    }
+    // Watchdog only requests; heartbeat owner closes and rebuilds its own lane.
+    let audit=unsafe{host_audit_count()};
+    unsafe{host_heartbeat_health_failure(1);}
+    heartbeat::check();
+    unsafe{host_heartbeat_health_failure(0);}
+    for _ in 0..200 {
+        if (audit..unsafe{host_audit_count()}).any(|i|unsafe{host_audit_field(i,1)}==hb_fd as u64){break;}
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let events=(audit..unsafe{host_audit_count()}).filter(|&i|unsafe{host_audit_field(i,1)}==hb_fd as u64).collect::<std::vec::Vec<_>>();
+    assert_eq!(events.len(),1,"health failure must close once");
+    assert_eq!(unsafe{host_audit_field(events[0],0)},1);
+    assert_ne!(unsafe{host_audit_field(events[0],2)},owner);
+    pong();
+    unsafe{host_heartbeat_stop(1);}
+    hb.join().unwrap();
+    unsafe{host_heartbeat_stop(0);ffi::sa_listener_close(fd);host_listener_fixture(0,-1,0);}
+}
+
+#[test]
+fn heartbeat_owner_closes_untracked_clients_without_touching_listener_or_files() {
+    use std::os::unix::{net::UnixStream, io::IntoRawFd};
+    unsafe extern "C" { fn fcntl(fd:i32, cmd:i32, ...)->i32; }
+    let _guard=SERIAL.lock().unwrap();
+    let file=std::fs::File::open("Cargo.toml").unwrap();
+    use std::os::fd::AsRawFd;
+    unsafe { ffi::close(file.as_raw_fd()); }
+    assert!(unsafe{fcntl(file.as_raw_fd(),1)}>=0,"registry close must preserve unknown files");
+    let (listener,_peer)=UnixStream::pair().unwrap();
+    for _ in 0..256 {
+        let (server,mut client)=UnixStream::pair().unwrap();
+        let fd=server.into_raw_fd();
+        client.write_all(b"x").unwrap();
+        heartbeat::reply(fd);
+        let mut pong=[0;5];client.read_exact(&mut pong).unwrap();
+        assert_eq!(&pong,b"pong\n");
+        assert_eq!(client.read(&mut [0]).unwrap(),0);
+        assert_eq!(unsafe{fcntl(fd,1)},-1,"accepted fd leaked");
+        assert!(unsafe{fcntl(listener.as_raw_fd(),1)}>=0);
+    }
+}
+
+#[test]
+fn heartbeat_nonblocking_failures_close_owned_descriptors() {
+    let _guard=SERIAL.lock().unwrap_or_else(|e|e.into_inner());
+    use std::os::unix::{net::UnixStream,io::IntoRawFd};
+    unsafe extern "C" {
+        fn host_heartbeat_run();
+        fn host_heartbeat_nonblocking_failure(error:i32);
+        fn host_listener_fixture(enabled:i32,client:i32,error:i32);
+        fn host_audit_count()->i32;
+        fn host_audit_field(i:i32,field:i32)->u64;
+    }
+    // Isolate fixture TLS and avoid binding in this fault-path test.
+    std::thread::spawn(|| unsafe {
+        host_heartbeat_run();
+        host_heartbeat_nonblocking_failure(13);
+        let audit=host_audit_count();
+        assert_eq!(ffi::sa_heartbeat_listen(),-13);
+        assert_eq!(host_audit_count(),audit+1);
+        assert_eq!(host_audit_field(audit,0),1);
+        let (server,_peer)=UnixStream::pair().unwrap();
+        let fd=server.into_raw_fd();
+        host_listener_fixture(1,fd,0);
+        let audit=host_audit_count();
+        assert_eq!(ffi::sa_heartbeat_accept(-1),-1);
+        assert_eq!(ffi::sa_errno(),13);
+        assert_eq!(host_audit_count(),audit+1);
+        assert_eq!(host_audit_field(audit,1),fd as u64);
+        host_heartbeat_nonblocking_failure(0);
+        host_listener_fixture(0,-1,0);
+    }).join().unwrap();
 }
