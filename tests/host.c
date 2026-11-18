@@ -348,3 +348,18 @@ void host_reboot_log_failure(int rc){atomic_store(&reboot_log_rc,rc);}
 int host_reboot_stat(int n){return atomic_load(n ? &reboot_logged : &reboot_calls);}
 uint32_t sa_reboot_log(void){atomic_store(&reboot_logged,1);return atomic_load(&reboot_log_rc);}
 uint32_t sa_reboot(void){atomic_fetch_add(&reboot_calls,1);return 91;}
+
+static _Thread_local uint32_t shot_rc, shot_stage;
+static _Thread_local uint64_t shot_size;
+void host_shot_fixture(uint32_t rc, uint32_t stage, uint64_t size) {
+    shot_rc=rc; shot_stage=stage; shot_size=size;
+}
+uint32_t sa_capture_jpeg(void *buf, size_t capacity, uint64_t *size, uint32_t *stage) {
+    *stage=shot_stage; *size=shot_size;
+    if (!shot_rc && shot_size>=4 && shot_size<=capacity) {
+        memset(buf,0x42,shot_size);
+        unsigned char *p=buf;
+        p[0]=0xff;p[1]=0xd8;p[shot_size-2]=0xff;p[shot_size-1]=0xd9;
+    }
+    return shot_rc;
+}

@@ -32,6 +32,7 @@ pub struct SleepSettings {
     pub console: i32,
 }
 extern "C" {
+    pub fn sa_capture_jpeg(buf: *mut u8, capacity: usize, size: *mut u64, stage: *mut u32) -> u32;
     pub fn sa_dump_mkdir(path: *const c_char) -> u32;
     pub fn sa_dump_meta(title: u64, storage: *mut u32, infos: *mut u8, capacity: u32, count: *mut u32) -> u32;
     pub fn sa_dump_read(storage: u32, id: *const u8, offset: u64, bytes: *mut u8, size: usize) -> u32;

@@ -58,6 +58,7 @@ then recovers. Commands are case-sensitive.
 | Command | Response |
 | --- | --- |
 | `ping` | `pong` |
+| `shot` | Write `/switch/swagent.jpg`; `shot: ok BYTES md5=HEX` |
 | `version` | `swagent-1.9-rs` |
 | `install http://host[:port]/file.nsp [sd\|nand] [md5=HEX]` | `install: ok TITLEID`, or `install: error WHAT rc=N` |
 | `update http://host[:port]/exefs.nsp` | `update: ok` then disconnect, or `update: error WHAT rc=N` |
@@ -305,7 +306,7 @@ Budget extensions emit a `debug: budget extended` log at most once per minute.
 
 `put PATH SIZE` accepts up to 4 MiB, including binary NRO payloads. The wire
 receiver retains its existing 512-byte streaming buffers and does not allocate a
-second large buffer. `cat` retains its 256 KiB limit and the heap remains 16 MiB.
+second large buffer. `cat` now supports 512 KiB for screenshots; the heap remains 16 MiB.
 
 
 swagent-1.25-rs keeps the 1.24 download retry, reconnect and Range behavior.
@@ -455,3 +456,20 @@ this ownership protocol. The missing process/new-generation logs make this bound
 visible. Sleep/resume as an original trigger remains unproven by host tests.
 
 发布前必须运行 `make release-check`（亦可 `make check`）。两者均强制真实 TCP 6001 bind、128 次重复连接及恢复期间 pong 验证；bind 不可用会打印明确 SKIP 原因并使验证 exit 非零，不能视为通过。默认 cargo test 同样禁止跳过后通过。版本保持 1.35。
+
+`shot\r\n` captures the current display through libnx `caps:sc`
+`capsscCaptureJpegScreenShot` (default layer stack, 1 second capture timeout).
+Fetch it with `cat /switch/swagent.jpg\r\n` (existing `cat: begin LENGTH\r\n`,
+exactly LENGTH binary bytes, `cat: end\r\n` framing), or verify it with
+`hash /switch/swagent.jpg\r\n`. The `cat` limit is now 512 KiB to cover the
+libnx JPEG buffer. `shot` takes no arguments; raw streaming is not implemented.
+Capture runs on the command worker, uses a fallible 512 KiB allocation, and
+releases `caps:sc` after each call. Errors reply `shot: error REASON rc=DECIMAL`;
+initialization and capture errors are distinguished. Capture failure leaves any
+previous JPEG untouched; filesystem write failures can leave a partial file.
+
+This sysmodule (430000000000000B) already has wildcard service access. No applet
+proxy is used. Local libnx documents JPEG capture on FW 9+, requiring debug mode
+only before FW 10; the obsolete raw capture API is not used. FW 23.0.1 capture
+and service policy still require hardware validation: host tests and a successful
+build cannot establish that `caps:sc` will permit capture on a particular system.

@@ -541,6 +541,31 @@ fn execute_inner(job: Job) {
                     reply(id, s.bytes())?;
                 }
             }
+            "shot" => {
+                if words.next().is_some() { return Err(Error("usage: shot", 0)); }
+                let mut jpeg = Buffer::new(0x80000)?;
+                let (mut size, mut stage) = (0u64, 0u32);
+                crate::budget::check()?;
+                let result = unsafe {
+                    let _operation = crate::budget::Operation::new();
+                    ffi::sa_capture_jpeg(jpeg.as_mut_ptr(), jpeg.len(), &mut size, &mut stage)
+                };
+                rc(result, if stage == 1 { "caps:sc initialize" } else { "caps:sc capture" })?;
+                if size < 4 || size > jpeg.len() as u64 {
+                    return Err(Error("invalid JPEG size", 0));
+                }
+                let bytes = &jpeg[..size as usize];
+                if !bytes.starts_with(&[0xff, 0xd8]) || !bytes.ends_with(&[0xff, 0xd9]) {
+                    return Err(Error("invalid JPEG", 0));
+                }
+                let mut hash = crate::md5::Md5::new();
+                hash.update(bytes);
+                // Only touch the fixed whitelist path after capture succeeds.
+                crate::files::Vfs::put(&crate::files::Sd, "sdmc:/switch/swagent.jpg", bytes)?;
+                let mut line = Text::<96>::new();
+                let _ = write!(line, "shot: ok {} md5={}", size, hash.finish().str());
+                reply(id, line.bytes())?;
+            }
             "hash" => {
                 let input = words.next().ok_or(Error("usage: hash SD-PATH", 0))?;
                 if words.next().is_some() {

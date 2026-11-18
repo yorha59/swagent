@@ -27,7 +27,9 @@ nm = pathlib.Path(os.environ.get('DEVKITPRO', str(pathlib.Path.home()/'devkitpro
 symbols = subprocess.check_output([nm, root/'build/swagent.elf'], text=True)
 assert re.search(r' T agent_main$', symbols, re.M)
 assert not re.search(r' T (?:_exit|exit|abort)$', symbols, re.M)
-assert not re.search(r'\b(?:sa_(?:hid_init|buttons|touch|capture|jpeg\w*)|hiddbg\w*|capssc\w*|tj\w*)$', symbols, re.M)
+assert not re.search(r'\b(?:sa_(?:hid_init|buttons|touch|capture|jpeg\w*)|hiddbg\w*|tj\w*)$', symbols, re.M)
+for symbol in ('sa_capture_jpeg', 'capsscInitialize', 'capsscCaptureJpegScreenShot', 'capsscExit'):
+    assert re.search(r' T ' + symbol + r'$', symbols, re.M), symbol
 assert b'swagent-1.35-rs' in elf
 assert (root/'build/swagent.nsp').read_bytes() == p
 assert (artifact.parent/'flags/boot2.flag').exists()

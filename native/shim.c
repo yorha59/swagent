@@ -964,3 +964,18 @@ Result sa_reboot(void) {
     bpcExit();
     return rc;
 }
+
+/* caps:sc is a direct system service; no applet proxy or VI initialization.
+ * libnx: JPEG capture is 9.0.0+, debug mode only required before 10.0.0.
+ * Caller owns the bounded buffer; always release the service after capture. */
+u32 sa_capture_jpeg(void *buf, size_t capacity, u64 *size, u32 *stage) {
+    *size=0; *stage=1;
+    if (capacity != CAPSSC_JPEG_BUFFER_SIZE)
+        return MAKERESULT(Module_Libnx,LibnxError_BadInput);
+    Result rc=capsscInitialize();
+    if (rc) return rc;
+    *stage=2;
+    rc=capsscCaptureJpegScreenShot(size,buf,capacity,ViLayerStack_Default,1000000000LL);
+    capsscExit();
+    return rc;
+}

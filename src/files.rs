@@ -1,6 +1,6 @@
 use crate::{io::File, util::*};
 use core::fmt::Write;
-pub const MAX: usize = 256 * 1024;
+pub const MAX: usize = 512 * 1024;
 pub const PUT_MAX: usize = 4 * 1024 * 1024;
 
 pub fn path(input: &str, write: bool) -> Result<Text<768>> {

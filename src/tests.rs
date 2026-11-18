@@ -640,7 +640,6 @@ fn removed_commands_are_unknown() {
     protocol::test_session(server.as_raw_fd());
     let mut client = BufReader::new(client);
     for command in [
-        "shot",
         "key A",
         "key ZR 100",
         "touch 100 200",
@@ -2654,4 +2653,41 @@ fn heartbeat_nonblocking_failures_close_owned_descriptors() {
         host_heartbeat_nonblocking_failure(0);
         host_listener_fixture(0,-1,0);
     }).join().unwrap();
+}
+
+#[test]
+fn screenshot_wire_success_errors_and_fetch() {
+    use std::{io::{BufRead, BufReader, Read}, os::unix::{io::AsRawFd, net::UnixStream}};
+    extern "C" { fn host_shot_fixture(rc:u32, stage:u32, size:u64); }
+    let _guard=SERIAL.lock().unwrap();
+    setup();
+    let (server,client)=UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+    protocol::test_session(server.as_raw_fd());
+    let mut reader=BufReader::new(client);
+    let mut jpeg=vec![0x42;300000]; // Above the old cat limit.
+    jpeg[..2].copy_from_slice(&[0xff,0xd8]);
+    jpeg[299998..].copy_from_slice(&[0xff,0xd9]);
+    let mut hash=md5::Md5::new(); hash.update(&jpeg);
+    for (rc,stage,size,command,expected) in [
+        (0,2,300000,"shot",format!("shot: ok 300000 md5={}\r\n",hash.finish().str())),
+        (123,1,0,"shot","shot: error caps:sc initialize rc=123\r\n".into()),
+        (456,2,0,"shot","shot: error caps:sc capture rc=456\r\n".into()),
+        (0,2,0x80001,"shot","shot: error invalid JPEG size rc=0\r\n".into()),
+        (0,2,0,"shot raw","shot: error usage: shot rc=0\r\n".into()),
+    ] {
+        unsafe { host_shot_fixture(rc,stage,size); }
+        protocol::test_receive(command); protocol::test_run_one();
+        let mut line=String::new();reader.read_line(&mut line).unwrap();
+        assert_eq!(line,expected);
+        assert_eq!(std::fs::read("build/host-sd/switch/swagent.jpg").unwrap(),jpeg);
+    }
+    // Stream concurrently: the framed binary response can exceed socket buffers.
+    let fetch=std::thread::spawn(|| protocol::test_file_line("cat /switch/swagent.jpg"));
+    let mut line=String::new();reader.read_line(&mut line).unwrap();
+    assert_eq!(line,"cat: begin 300000\r\n");
+    let mut bytes=vec![0;300000];reader.read_exact(&mut bytes).unwrap();assert_eq!(bytes,jpeg);
+    line.clear();reader.read_line(&mut line).unwrap();assert_eq!(line,"cat: end\r\n");
+    fetch.join().unwrap();
+    std::fs::remove_file("build/host-sd/switch/swagent.jpg").unwrap();
 }
