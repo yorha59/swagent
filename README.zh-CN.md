@@ -2,6 +2,10 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+<p align="center">
+  <img src="docs/banner.png" alt="swagent" width="900"/>
+</p>
+
 无界面的 Atmosphere **sysmodule**：把 Switch 变成一台可脚本化的 TCP 命令代理——装 NSP、热更新自身、读写 SD、截 JPEG、查状态。
 
 - **Title ID：** `430000000000000B`
@@ -12,6 +16,8 @@
 > **声明** — 仅供自有主机、合法内容。仓库不含 keys / 固件 / 任天堂专有代码。与 Nintendo 无关。风险自负。
 
 ## 定位
+
+![架构示意](docs/architecture.png)
 
 常见方案要么是完整 FTP，要么是按键代理，要么是机内 GUI 安装器。swagent 反着来：给笔记本 / CI agent 留一条**常驻命令管道**。安装不占收包线程；`ping` / `version` / `update` 保持快路径；listener 由单一 owner 负责重建，避免乱关 FD。
 
@@ -46,6 +52,8 @@ cp -R dist/atmosphere /path/to/sd_root/
 可选 hbmenu 版：`make nro` → `dist/switch/swagent.nro` 拷到 `/switch/`。
 
 ## 上手
+
+![命令示例](docs/protocol-demo.png)
 
 ```sh
 printf 'ping\r\nversion\r\n' | nc SWITCH_IP 6000

@@ -2,6 +2,10 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+<p align="center">
+  <img src="docs/banner.png" alt="swagent — Atmosphere sysmodule TCP agent" width="900"/>
+</p>
+
 Headless Atmosphere **sysmodule** that turns a Nintendo Switch into a small TCP command agent: install NSPs, hot-update itself, move files on the SD card, capture a JPEG screenshot, and report status — no on-console UI.
 
 - **Title ID:** `430000000000000B`
@@ -14,6 +18,8 @@ Headless Atmosphere **sysmodule** that turns a Nintendo Switch into a small TCP 
 ## Why this exists
 
 Most Switch remotes are either full FTP daemons, game-input proxies, or GUI installers. swagent is the opposite: a **resident, scriptable pipe** you talk to from a laptop/CI agent with one-line commands. Install stays off the receive thread; `ping` / `version` / `update` stay fast; recovery of the listener is owner-driven so a stuck accept does not require guessing which FD to kill.
+
+![Architecture: host/CI talks to swagent over TCP 6000/6001](docs/architecture.png)
 
 ## Install
 
@@ -76,6 +82,8 @@ printf 'shot\r\n' | nc SWITCH_IP 6000
 ```
 
 ## Protocol (summary)
+
+![Example TCP session: ping, shot, install, update](docs/protocol-demo.png)
 
 | Command | Purpose |
 | --- | --- |
