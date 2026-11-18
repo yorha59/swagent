@@ -2154,8 +2154,11 @@ impl dump::Backend for DumpFixture {
 #[test]
 fn dump_real_fixtures_byte_exact_roundtrip() {
     let _guard=SERIAL.lock().unwrap();setup();
+    let fixture_dir=std::env::var("SWAGENT_FIXTURE_DIR").unwrap_or_default();
+    if fixture_dir.is_empty() { eprintln!("skip: set SWAGENT_FIXTURE_DIR for real NSP fixtures"); return; }
     for stem in ["GTA_VC_Base","P5R_UPDATE"] {
-        let path=format!("/Users/sichengzu/Switch/nsp_share/{stem}.nsp");
+        let path=format!("{fixture_dir}/{stem}.nsp");
+        if !std::path::Path::new(&path).is_file() { eprintln!("skip missing {path}"); continue; }
         let mut source=DumpFixture::open(&path);
         let items=source.items();
         let used=16+items.count*24+items.entries().iter().map(|e| e.name.len+1).sum::<usize>();
@@ -2254,8 +2257,12 @@ fn dump_progress_renews_budget_and_stall_expires() {
 #[test]
 fn dump_mock_fixture_pipeline_preserves_nca_ticket_and_cert() {
     let _guard=SERIAL.lock().unwrap();setup();
-    let fixture="/Users/sichengzu/Switch/nsp_share/P5R_UPDATE.nsp";
-    let mut source=DumpFixture::open(fixture);
+    let fixture_dir=std::env::var("SWAGENT_FIXTURE_DIR").unwrap_or_default();
+    let fixture=format!("{fixture_dir}/P5R_UPDATE.nsp");
+    if fixture_dir.is_empty() || !std::path::Path::new(&fixture).is_file() {
+        eprintln!("skip: set SWAGENT_FIXTURE_DIR with P5R_UPDATE.nsp"); return;
+    }
+    let mut source=DumpFixture::open(&fixture);
     dump::run(&mut source,0x01004b10157f2800,Some("/switch/dump/fixture.nsp"),&mut |_|{}).unwrap();
     let mut rebuilt=io::File::open("sdmc:/switch/dump/fixture.nsp",false).unwrap();
     let pfs=install::Pfs::open(&mut rebuilt).unwrap();assert_eq!(pfs.count,source.pfs.count);
