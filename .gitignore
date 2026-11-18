@@ -4,3 +4,12 @@
 
 __pycache__/
 *.pyc
+
+# secrets / machine-local
+prod.keys
+prod.keys.raw
+keys_raw.txt
+*.keys
+nas_backup.sh
+nas_tar.sh
+*.log
